@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.5"
+readonly VERSION="4.1.6"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -458,6 +458,7 @@ download_github_release() {
     url="$(jq -er --arg re "$pattern" '.assets[] | select(.name | test($re)) | .browser_download_url' "$json")"
     digest="$(jq -r --arg re "$pattern" '.assets[] | select(.name | test($re)) | (.digest // "")' "$json")"
     rm -f "$json"
+    [[ "${RELEASE_CHECK_ONLY:-false}" == true ]] && return 0
     info "下载 $repo $DOWNLOADED_VERSION"
     download "$url" "$output"
     if [[ "$digest" == sha256:* ]]; then
@@ -692,6 +693,8 @@ install_snell_binary() {
         version="$(awk '{ key=$0; if (key ~ /[[:alpha:]]+$/) key=key "0"; print key "\t" $0 }' <<<"$versions" | sort -V -k1,1 | tail -n1 | cut -f2-)"
     fi
     [[ -n "$version" ]] || die "无法从 Snell 官方发布页取得 v${protocol} 的 ${arch} 版本。"
+    SNELL_VERSION="$version"
+    if [[ "${SNELL_CHECK_ONLY:-false}" == true ]]; then rm -rf "$tmpdir"; return 0; fi
     url="https://dl.nssurge.com/snell/snell-server-${version}-linux-${arch}.zip"
     zip="$tmpdir/snell.zip"; info "下载 Snell $version"; download "$url" "$zip"
     unzip -q "$zip" -d "$tmpdir/unpack"
@@ -699,7 +702,6 @@ install_snell_binary() {
     [[ -n "$candidate" ]] || die "Snell 压缩包中缺少服务器程序。"
     chmod +x "$candidate"; "$candidate" --help >/dev/null 2>&1 || true
     atomic_binary_install "$candidate" "$SNELL_BIN"
-    SNELL_VERSION="$version"
     rm -rf "$tmpdir"
 }
 
@@ -786,6 +788,13 @@ install_snell() {
             detected_protocol="$current_protocol"
         done < <(proxy_instance_dirs snell)
         [[ -n "$detected_protocol" ]] || die "没有可更新的 Snell 实例。"
+        SNELL_CHECK_ONLY=true install_snell_binary "$detected_protocol"
+        updated=0
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
+            [[ "$(read_meta "$(snell_instance_dir "$instance")/meta" VERSION)" == "$SNELL_VERSION" ]] || updated=$((updated + 1))
+        done < <(proxy_instance_dirs snell)
+        ((updated > 0)) || { ok "Snell 已是最新版本：$SNELL_VERSION（无需更新）。"; return; }
         install_snell_binary "$detected_protocol"
         [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
         while read -r instance; do
@@ -801,6 +810,10 @@ install_snell() {
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     target_protocol="$(select_snell_protocol 5)"
+    SNELL_CHECK_ONLY=true install_snell_binary "$target_protocol"
+    if [[ -d "$(snell_instance_dir "$instance")" ]] && [[ "$(read_meta "$(snell_instance_dir "$instance")/meta" VERSION)" == "$SNELL_VERSION" ]]; then
+        ok "Snell 实例 $instance 已是最新版本：$SNELL_VERSION（无需更新）。"; return
+    fi
     install_snell_binary "$target_protocol"
     [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
     if [[ -d "$(snell_instance_dir "$instance")" ]]; then
@@ -869,8 +882,13 @@ install_ss() {
     migrate_proxy_legacy ss2022
     show_existing_instances ss2022
     read -r -p '实例编号（1-999；直接回车更新全部已安装实例）: ' instance
-    install_ss_binary
+    RELEASE_CHECK_ONLY=true download_github_release shadowsocks/shadowsocks-rust "$(ss_asset_pattern)" /dev/null
+    SS_VERSION="$DOWNLOADED_VERSION"
     if [[ -z "$instance" ]]; then
+        updated=0
+        while read -r instance; do [[ -z "$instance" ]] || [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" != "$SS_VERSION" ]] && updated=$((updated + 1)); done < <(proxy_instance_dirs ss2022)
+        ((updated > 0)) || { ok "SS-2022 已是最新版本：$SS_VERSION（无需更新）。"; return; }
+        install_ss_binary
         while read -r instance; do
             [[ -z "$instance" ]] && continue
             meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
@@ -883,6 +901,10 @@ install_ss() {
         return
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    if [[ -d "$(ss_instance_dir "$instance")" ]] && [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" == "$SS_VERSION" ]]; then
+        ok "SS-2022 实例 $instance 已是最新版本：$SS_VERSION（无需更新）。"; return
+    fi
+    install_ss_binary
     if [[ -d "$(ss_instance_dir "$instance")" ]]; then
         meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
         restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
