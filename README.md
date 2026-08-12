@@ -71,6 +71,8 @@ sudo ./newworld-manager.sh self-install
 sudo nw-manager status
 ```
 
+重复执行 `self-install` 是安全的；如果脚本已从全局安装位置运行，会跳过复制，仅修复 `nw-manager` 快捷命令。
+
 命令行示例：
 
 ```bash

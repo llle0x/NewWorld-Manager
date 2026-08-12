@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld Manager"
-readonly VERSION="3.3.1"
+readonly VERSION="3.3.2"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -953,7 +953,11 @@ install_manager() {
         source="$temporary"
     fi
     install -d -m 0755 /usr/local/sbin "$BIN_DIR"
-    install -m 0755 "$source" "$target"
+    if [[ "$source" -ef "$target" ]]; then
+        info "管理脚本已位于 $target，跳过重复复制。"
+    else
+        install -m 0755 "$source" "$target"
+    fi
     [[ -z "$temporary" ]] || rm -f "$temporary"
     ln -sfn "$target" "$BIN_DIR/nw-manager"
     ok "已安装命令：nw-manager"
