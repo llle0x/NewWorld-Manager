@@ -2,17 +2,18 @@
 set -Eeuo pipefail
 
 inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 4.1.10" ]]
+[[ "$inline_output" == "NewWorld-Manager 4.1.11" ]]
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "4.1.10" ]]
+[[ "$VERSION" == "4.1.11" ]]
 valid_instance_id 1
 valid_instance_id 99
 if valid_instance_id 0; then exit 1; fi
 if valid_instance_id 100; then exit 1; fi
 [[ "$(snell_service 12)" == "newworld-snell-12.service" ]]
 [[ "$(ss_service 34)" == "newworld-ss2022-34.service" ]]
+show_existing_instances snell
 [[ "$(select_snell_protocol 5 <<<6)" == 6 ]]
 [[ "$(select_boolean test true <<<2)" == false ]]
 [[ "$(select_dns_preference <<<4)" == ipv4-only ]]

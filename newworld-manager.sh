@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.10"
+readonly VERSION="4.1.11"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -276,7 +276,10 @@ show_existing_instances() {
     else
         while read -r instance; do [[ -z "$instance" ]] || instances+=("$instance"); done < <(proxy_instance_dirs "$kind")
     fi
-    ((${#instances[@]})) && printf '已安装实例：%s\n' "${instances[*]}"
+    if ((${#instances[@]})); then
+        printf '已安装实例：%s\n' "${instances[*]}"
+    fi
+    return 0
 }
 
 select_proxy_instance() {
