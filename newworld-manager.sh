@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.7"
+readonly VERSION="4.1.8"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -236,7 +236,7 @@ shadowtls_surge_options() {
 
 shadowtls_service() { printf '%s-%s.service' "$STLS_SERVICE_PREFIX" "$1"; }
 shadowtls_instance_dir() { printf '%s/instances/%s' "$STLS_ROOT" "$1"; }
-valid_instance_id() { [[ "$1" =~ ^[1-9][0-9]{0,2}$ ]]; }
+valid_instance_id() { [[ "$1" =~ ^[1-9][0-9]?$ ]]; }
 
 snell_service() { printf 'newworld-snell-%s.service' "$1"; }
 ss_service() { printf 'newworld-ss2022-%s.service' "$1"; }
@@ -708,8 +708,8 @@ install_snell_binary() {
 configure_snell() {
     local protocol="${1:-}" instance="${2:-}" port psk bind listen tfo dns config meta ipv6 obfs obfs_host dns_pref mode service
     migrate_proxy_legacy snell
-    [[ -n "$instance" ]] || { show_existing_instances snell; read -r -p '实例编号（1-999）: ' instance; }
-    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    [[ -n "$instance" ]] || { show_existing_instances snell; read -r -p '实例编号（1-99）: ' instance; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     [[ ! -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 已存在。"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$SNELL_ROOT/instances" "$(snell_instance_dir "$instance")"
     config="$(snell_instance_dir "$instance")/snell.conf"; meta="$(snell_instance_dir "$instance")/meta"
@@ -779,7 +779,7 @@ install_snell() {
     local target_protocol instance meta port bind current_protocol updated=0 detected_protocol=""
     migrate_proxy_legacy snell
     show_existing_instances snell
-    read -r -p '实例编号（1-999；直接回车更新全部已安装实例）: ' instance
+    read -r -p '实例编号（1-99；直接回车更新全部已安装实例）: ' instance
     if [[ -z "$instance" ]]; then
         while read -r instance; do
             [[ -z "$instance" ]] && continue
@@ -808,7 +808,7 @@ install_snell() {
         ok "已更新全部 $updated 个 Snell 实例到 $SNELL_VERSION。"
         return
     fi
-    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     target_protocol="$(select_snell_protocol 5)"
     SNELL_CHECK_ONLY=true install_snell_binary "$target_protocol"
     if [[ -d "$(snell_instance_dir "$instance")" ]] && [[ "$(read_meta "$(snell_instance_dir "$instance")/meta" VERSION)" == "$SNELL_VERSION" ]]; then
@@ -854,8 +854,8 @@ install_ss_binary() {
 configure_ss() {
     local instance="${1:-}" port password method bind config meta service
     migrate_proxy_legacy ss2022
-    [[ -n "$instance" ]] || { show_existing_instances ss2022; read -r -p '实例编号（1-999）: ' instance; }
-    valid_instance_id "$instance" || die "Invalid instance ID."
+    [[ -n "$instance" ]] || { show_existing_instances ss2022; read -r -p '实例编号（1-99）: ' instance; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     [[ ! -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 instance $instance already exists."
     install -d -m 0750 -o root -g "$SERVICE_USER" "$SS_ROOT/instances" "$(ss_instance_dir "$instance")"
     config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"
@@ -881,7 +881,7 @@ install_ss() {
     local instance meta port bind updated=0
     migrate_proxy_legacy ss2022
     show_existing_instances ss2022
-    read -r -p '实例编号（1-999；直接回车更新全部已安装实例）: ' instance
+    read -r -p '实例编号（1-99；直接回车更新全部已安装实例）: ' instance
     RELEASE_CHECK_ONLY=true download_github_release shadowsocks/shadowsocks-rust "$(ss_asset_pattern)" /dev/null
     SS_VERSION="$DOWNLOADED_VERSION"
     if [[ -z "$instance" ]]; then
@@ -900,7 +900,7 @@ install_ss() {
         ok "已更新全部 $updated 个 SS-2022 实例到 $SS_VERSION。"
         return
     fi
-    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     if [[ -d "$(ss_instance_dir "$instance")" ]] && [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" == "$SS_VERSION" ]]; then
         ok "SS-2022 实例 $instance 已是最新版本：$SS_VERSION（无需更新）。"; return
     fi
@@ -956,11 +956,10 @@ set_backend_bind() {
 }
 
 configure_stls() {
-    local instance target backend_instance backend_dir listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
+    local instance="${1:-}" target backend_instance backend_dir listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
     shadowtls_migrate_legacy
-    show_existing_instances shadowtls
-    read -r -p '实例编号（1-999）: ' instance
-    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    [[ -n "$instance" ]] || { show_existing_instances shadowtls; read -r -p '实例编号（1-99）: ' instance; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "实例 $instance 已存在；请先卸载该实例，或使用更新功能。"
     printf '后端：1) Snell  2) ss-2022\n'; read -r -p '请选择 [1-2]: ' target
     case "$target" in
@@ -998,16 +997,16 @@ $(cat "$env")
 }
 
 install_stls() {
-    local instance meta port action updated=0
+    local instance meta port updated=0
     shadowtls_migrate_legacy
     if [[ -n "$(shadowtls_instance_dirs)" ]]; then
-        printf 'ShadowTLS：1) 新建实例  2) 更新全部已有实例\n'
-        read -r -p '请选择 [1-2，默认 1]: ' action; action="${action:-1}"
-        case "$action" in
-            1) install_stls_binary; configure_stls; return ;;
-            2) ;;
-            *) die "选择无效。" ;;
-        esac
+        show_existing_instances shadowtls
+        read -r -p '实例编号（1-99；直接回车更新全部已安装实例）: ' instance
+        if [[ -n "$instance" ]]; then
+            valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+            [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "ShadowTLS 实例 $instance 已存在；直接回车可更新全部实例。"
+            install_stls_binary; configure_stls "$instance"; return
+        fi
     fi
     if [[ -n "$(shadowtls_instance_dirs)" ]]; then
         RELEASE_CHECK_ONLY=true download_github_release ihciah/shadow-tls "$(stls_asset_pattern)" /dev/null
