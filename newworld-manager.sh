@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.1"
+readonly VERSION="4.1.2"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -267,6 +267,16 @@ proxy_instance_dirs() {
     migrate_proxy_legacy "$kind"
     [[ "$kind" == snell ]] && root="$SNELL_ROOT" || root="$SS_ROOT"
     find "$root/instances" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n
+}
+
+show_existing_instances() {
+    local kind="$1" instance instances=()
+    if [[ "$kind" == shadowtls ]]; then
+        while read -r instance; do [[ -z "$instance" ]] || instances+=("$instance"); done < <(shadowtls_instance_dirs)
+    else
+        while read -r instance; do [[ -z "$instance" ]] || instances+=("$instance"); done < <(proxy_instance_dirs "$kind")
+    fi
+    ((${#instances[@]})) && printf '已安装实例：%s\n' "${instances[*]}"
 }
 
 select_proxy_instance() {
@@ -696,7 +706,7 @@ install_snell_binary() {
 configure_snell() {
     local protocol="${1:-}" instance="${2:-}" port psk bind listen tfo dns config meta ipv6 obfs obfs_host dns_pref mode service
     migrate_proxy_legacy snell
-    [[ -n "$instance" ]] || { read -r -p '实例编号（1-999）: ' instance; }
+    [[ -n "$instance" ]] || { show_existing_instances snell; read -r -p '实例编号（1-999）: ' instance; }
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     [[ ! -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 已存在。"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$SNELL_ROOT/instances" "$(snell_instance_dir "$instance")"
@@ -809,7 +819,7 @@ install_ss_binary() {
 configure_ss() {
     local instance="${1:-}" port password method bind config meta service
     migrate_proxy_legacy ss2022
-    [[ -n "$instance" ]] || read -r -p 'Instance ID (1-999): ' instance
+    [[ -n "$instance" ]] || { show_existing_instances ss2022; read -r -p '实例编号（1-999）: ' instance; }
     valid_instance_id "$instance" || die "Invalid instance ID."
     [[ ! -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 instance $instance already exists."
     install -d -m 0750 -o root -g "$SERVICE_USER" "$SS_ROOT/instances" "$(ss_instance_dir "$instance")"
@@ -891,6 +901,7 @@ set_backend_bind() {
 configure_stls() {
     local instance target backend_instance backend_dir listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
     shadowtls_migrate_legacy
+    show_existing_instances shadowtls
     read -r -p '实例编号（1-999）: ' instance
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "实例 $instance 已存在；请先卸载该实例，或使用更新功能。"
