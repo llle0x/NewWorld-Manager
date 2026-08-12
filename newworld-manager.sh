@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.8"
+readonly VERSION="4.1.9"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -779,7 +779,7 @@ install_snell() {
     local target_protocol instance meta port bind current_protocol updated=0 detected_protocol=""
     migrate_proxy_legacy snell
     show_existing_instances snell
-    read -r -p '实例编号（1-99；直接回车更新全部已安装实例）: ' instance
+    read -r -p '实例编号（1-99；新编号安装、已有编号更新；回车更新全部）: ' instance
     if [[ -z "$instance" ]]; then
         while read -r instance; do
             [[ -z "$instance" ]] && continue
@@ -881,7 +881,7 @@ install_ss() {
     local instance meta port bind updated=0
     migrate_proxy_legacy ss2022
     show_existing_instances ss2022
-    read -r -p '实例编号（1-99；直接回车更新全部已安装实例）: ' instance
+    read -r -p '实例编号（1-99；新编号安装、已有编号更新；回车更新全部）: ' instance
     RELEASE_CHECK_ONLY=true download_github_release shadowsocks/shadowsocks-rust "$(ss_asset_pattern)" /dev/null
     SS_VERSION="$DOWNLOADED_VERSION"
     if [[ -z "$instance" ]]; then
@@ -1001,7 +1001,7 @@ install_stls() {
     shadowtls_migrate_legacy
     if [[ -n "$(shadowtls_instance_dirs)" ]]; then
         show_existing_instances shadowtls
-        read -r -p '实例编号（1-99；直接回车更新全部已安装实例）: ' instance
+        read -r -p '实例编号（1-99；输入新编号安装；回车更新全部）: ' instance
         if [[ -n "$instance" ]]; then
             valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
             [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "ShadowTLS 实例 $instance 已存在；直接回车可更新全部实例。"
