@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.3"
+readonly VERSION="4.1.4"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -774,14 +774,28 @@ EOF
 }
 
 install_snell() {
-    local target_protocol instance meta port bind current_protocol
+    local target_protocol instance meta port bind current_protocol updated=0
     migrate_proxy_legacy snell
     show_existing_instances snell
-    read -r -p '实例编号（1-999；已有实例将更新二进制）: ' instance
-    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    read -r -p '实例编号（1-999；直接回车更新全部已安装实例）: ' instance
     target_protocol="$(select_snell_protocol 5)"
     install_snell_binary "$target_protocol"
     [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
+    if [[ -z "$instance" ]]; then
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
+            meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
+            [[ "$current_protocol" == "$target_protocol" ]] || die "Snell 实例 $instance 的协议为 v$current_protocol，不能与所选 v$target_protocol 一起更新。"
+            port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
+            restart_or_rollback "$(snell_service "$instance")" "$SNELL_BIN"
+            write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
+            updated=$((updated + 1))
+        done < <(proxy_instance_dirs snell)
+        ((updated > 0)) || die "没有可更新的 Snell 实例。"
+        ok "已更新全部 $updated 个 Snell 实例到 $SNELL_VERSION。"
+        return
+    fi
+    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     if [[ -d "$(snell_instance_dir "$instance")" ]]; then
         meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
         [[ "$current_protocol" == "$target_protocol" ]] || die "Instance $instance protocol differs; reconfigure it to change protocol."
@@ -844,12 +858,24 @@ configure_ss() {
 }
 
 install_ss() {
-    local instance meta port bind
+    local instance meta port bind updated=0
     migrate_proxy_legacy ss2022
     show_existing_instances ss2022
-    read -r -p '实例编号（1-999；已有实例将更新二进制）: ' instance
-    valid_instance_id "$instance" || die "Invalid instance ID."
+    read -r -p '实例编号（1-999；直接回车更新全部已安装实例）: ' instance
     install_ss_binary
+    if [[ -z "$instance" ]]; then
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
+            meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
+            restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
+            write_meta "$meta" "VERSION=$SS_VERSION" "PORT=$port" "BIND=$bind"
+            firewall_open "$port" tcp; firewall_open "$port" udp; updated=$((updated + 1))
+        done < <(proxy_instance_dirs ss2022)
+        ((updated > 0)) || die "没有可更新的 SS-2022 实例。"
+        ok "已更新全部 $updated 个 SS-2022 实例到 $SS_VERSION。"
+        return
+    fi
+    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     if [[ -d "$(ss_instance_dir "$instance")" ]]; then
         meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
         restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
