@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.2.1"
+readonly VERSION="4.2.2"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -1295,8 +1295,8 @@ check_manager_update() {
         warn "远端版本 ${remote_version} 不高于当前版本 ${VERSION}，不执行更新。"
         return 0
     fi
-    info "发现新版本：$VERSION → $remote_version"
-    confirm "是否更新并安装 nw-manager $remote_version？" || { warn "已取消更新。"; return 0; }
+    info "发现新版本：${VERSION} → ${remote_version}"
+    confirm "是否更新并安装 nw-manager ${remote_version}？" || { warn "已取消更新。"; return 0; }
     install -d -m 0755 /usr/local/sbin "$BIN_DIR"
     install -m 0755 -o root -g root "$remote_script" "$target"
     ln -sfn "$target" "$BIN_DIR/nw-manager"
