@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld Manager"
-readonly VERSION="3.3.4"
+readonly VERSION="3.3.5"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -210,6 +210,17 @@ print_config_block() {
     printf '\n========== %s ==========' "$title"
     printf '\n%s\n' "$content"
     printf '%s\n' '================================'
+}
+
+shadowtls_target_active() {
+    local target="$1"
+    [[ -f "$ROOT_DIR/shadowtls/environment" ]] && [[ "$(read_meta "$ROOT_DIR/shadowtls/meta" TARGET 2>/dev/null || true)" == "$target" ]]
+}
+
+shadowtls_surge_options() {
+    local env="$ROOT_DIR/shadowtls/environment" password sni
+    password="$(read_meta "$env" PASSWORD)"; sni="$(read_meta "$env" TLS_HOST)"
+    printf 'shadow-tls-password=%s, shadow-tls-sni=%s, shadow-tls-version=3' "$password" "$sni"
 }
 
 architecture() {
@@ -806,6 +817,7 @@ configure_stls() {
     print_config_block 'ShadowTLS v3 完整服务器配置' "地址 = $(public_ip)
 $(cat "$env")
 后端 = ${target} (127.0.0.1:${backend_port})"
+    show_config "$target"
 }
 
 install_stls() {
@@ -903,7 +915,7 @@ show_status() {
 }
 
 show_config() {
-    local component="$1" config port psk protocol tfo mode obfs obfs_host method password ss_url client_config
+    local component="$1" config port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
     require_root
     case "$component" in
         snell)
@@ -915,22 +927,38 @@ show_config() {
             mode="$(sed -nE 's/^mode[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             obfs="$(sed -nE 's/^obfs[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             obfs_host="$(sed -nE 's/^obfs-host[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
-            client_config="$(hostname) = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
+            external_port="$port"
+            if shadowtls_target_active snell; then
+                external_port="$(read_meta "$ROOT_DIR/shadowtls/meta" PORT)"
+                stls_options="$(shadowtls_surge_options)"
+            else stls_options=""; fi
+            client_config="$(hostname) = snell, $(public_ip), ${external_port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
             [[ "$protocol" != 6 || "$mode" == default || -z "$mode" ]] || client_config+=", mode=${mode}"
             [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
-            print_config_block 'Snell 客户端配置（Surge [Proxy]）' "$client_config"
+            [[ -z "$stls_options" ]] || client_config+=", ${stls_options}"
+            print_config_block "Snell 客户端配置（Surge [Proxy]${stls_options:+，经 ShadowTLS v3}）" "$client_config"
             print_config_block "Snell 服务器配置（$(read_meta "$ROOT_DIR/snell/meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
         ss|ss2022)
             config="$ROOT_DIR/ss2022/config.json"; [[ -f "$config" ]] || die "未安装。"
             method="$(jq -er '.method' "$config")"; password="$(jq -er '.password' "$config")"; port="$(jq -er '.server_port' "$config")"
-            ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
-            print_config_block 'SS-2022 客户端链接' "$ss_url"
+            external_port="$port"
+            if shadowtls_target_active ss2022; then
+                external_port="$(read_meta "$ROOT_DIR/shadowtls/meta" PORT)"
+                stls_options="$(shadowtls_surge_options)"
+                client_config="$(hostname) = ss, $(public_ip), ${external_port}, encrypt-method=${method}, password=${password}, ${stls_options}"
+                print_config_block 'SS-2022 客户端配置（Surge [Proxy]，经 ShadowTLS v3）' "$client_config"
+            else
+                ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
+                print_config_block 'SS-2022 客户端链接' "$ss_url"
+            fi
             print_config_block 'SS-2022 服务器配置' "$(jq . "$config")" ;;
         shadowtls)
             config="$ROOT_DIR/shadowtls/environment"; [[ -f "$config" ]] || die "未安装。"
             print_config_block 'ShadowTLS v3 完整服务器配置' "地址 = $(public_ip)
 $(cat "$config")
-后端 = $(read_meta "$ROOT_DIR/shadowtls/meta" TARGET 2>/dev/null || printf unknown) (127.0.0.1:$(read_meta "$ROOT_DIR/shadowtls/meta" BACKEND_PORT 2>/dev/null || printf unknown))" ;;
+后端 = $(read_meta "$ROOT_DIR/shadowtls/meta" TARGET 2>/dev/null || printf unknown) (127.0.0.1:$(read_meta "$ROOT_DIR/shadowtls/meta" BACKEND_PORT 2>/dev/null || printf unknown))"
+            target="$(read_meta "$ROOT_DIR/shadowtls/meta" TARGET 2>/dev/null || true)"
+            [[ -z "$target" ]] || show_config "$target" ;;
         *) die "未知组件。" ;;
     esac
 }
