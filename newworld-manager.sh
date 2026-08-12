@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.4"
+readonly VERSION="4.1.5"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -774,28 +774,35 @@ EOF
 }
 
 install_snell() {
-    local target_protocol instance meta port bind current_protocol updated=0
+    local target_protocol instance meta port bind current_protocol updated=0 detected_protocol=""
     migrate_proxy_legacy snell
     show_existing_instances snell
     read -r -p '实例编号（1-999；直接回车更新全部已安装实例）: ' instance
-    target_protocol="$(select_snell_protocol 5)"
-    install_snell_binary "$target_protocol"
-    [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
     if [[ -z "$instance" ]]; then
         while read -r instance; do
             [[ -z "$instance" ]] && continue
             meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
-            [[ "$current_protocol" == "$target_protocol" ]] || die "Snell 实例 $instance 的协议为 v$current_protocol，不能与所选 v$target_protocol 一起更新。"
+            [[ -z "$detected_protocol" || "$detected_protocol" == "$current_protocol" ]] || die "检测到 Snell v5 与 v6 混合实例；请按实例编号分别更新。"
+            detected_protocol="$current_protocol"
+        done < <(proxy_instance_dirs snell)
+        [[ -n "$detected_protocol" ]] || die "没有可更新的 Snell 实例。"
+        install_snell_binary "$detected_protocol"
+        [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
+            meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
             port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
             restart_or_rollback "$(snell_service "$instance")" "$SNELL_BIN"
             write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
             updated=$((updated + 1))
         done < <(proxy_instance_dirs snell)
-        ((updated > 0)) || die "没有可更新的 Snell 实例。"
         ok "已更新全部 $updated 个 Snell 实例到 $SNELL_VERSION。"
         return
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    target_protocol="$(select_snell_protocol 5)"
+    install_snell_binary "$target_protocol"
+    [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
     if [[ -d "$(snell_instance_dir "$instance")" ]]; then
         meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
         [[ "$current_protocol" == "$target_protocol" ]] || die "Instance $instance protocol differs; reconfigure it to change protocol."
