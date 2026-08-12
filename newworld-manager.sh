@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld Manager"
-readonly VERSION="3.3.3"
+readonly VERSION="3.3.4"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -903,12 +903,34 @@ show_status() {
 }
 
 show_config() {
-    local component="$1"
+    local component="$1" config port psk protocol tfo mode obfs obfs_host method password ss_url client_config
     require_root
     case "$component" in
-        snell) [[ -f "$ROOT_DIR/snell/snell.conf" ]] || die "未安装。"; sed -n '/^listen/p;/^psk/p;/^ipv6/p;/^obfs/p;/^tfo/p;/^dns/p;/^mode/p;/^version/p' "$ROOT_DIR/snell/snell.conf" ;;
-        ss|ss2022) [[ -f "$ROOT_DIR/ss2022/config.json" ]] || die "未安装。"; jq . "$ROOT_DIR/ss2022/config.json" ;;
-        shadowtls) [[ -f "$ROOT_DIR/shadowtls/environment" ]] || die "未安装。"; cat "$ROOT_DIR/shadowtls/environment" ;;
+        snell)
+            config="$ROOT_DIR/snell/snell.conf"; [[ -f "$config" ]] || die "未安装。"
+            port="$(read_meta "$ROOT_DIR/snell/meta" PORT)"
+            psk="$(sed -nE 's/^psk[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
+            protocol="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*([0-9]+)$/\1/p' "$config")"
+            tfo="$(sed -nE 's/^tfo[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
+            mode="$(sed -nE 's/^mode[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
+            obfs="$(sed -nE 's/^obfs[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
+            obfs_host="$(sed -nE 's/^obfs-host[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
+            client_config="$(hostname) = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
+            [[ "$protocol" != 6 || "$mode" == default || -z "$mode" ]] || client_config+=", mode=${mode}"
+            [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
+            print_config_block 'Snell 客户端配置（Surge [Proxy]）' "$client_config"
+            print_config_block "Snell 服务器配置（$(read_meta "$ROOT_DIR/snell/meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
+        ss|ss2022)
+            config="$ROOT_DIR/ss2022/config.json"; [[ -f "$config" ]] || die "未安装。"
+            method="$(jq -er '.method' "$config")"; password="$(jq -er '.password' "$config")"; port="$(jq -er '.server_port' "$config")"
+            ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
+            print_config_block 'SS-2022 客户端链接' "$ss_url"
+            print_config_block 'SS-2022 服务器配置' "$(jq . "$config")" ;;
+        shadowtls)
+            config="$ROOT_DIR/shadowtls/environment"; [[ -f "$config" ]] || die "未安装。"
+            print_config_block 'ShadowTLS v3 完整服务器配置' "地址 = $(public_ip)
+$(cat "$config")
+后端 = $(read_meta "$ROOT_DIR/shadowtls/meta" TARGET 2>/dev/null || printf unknown) (127.0.0.1:$(read_meta "$ROOT_DIR/shadowtls/meta" BACKEND_PORT 2>/dev/null || printf unknown))" ;;
         *) die "未知组件。" ;;
     esac
 }
