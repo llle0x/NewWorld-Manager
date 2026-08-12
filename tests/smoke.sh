@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 4.1.2" ]]
+[[ "$inline_output" == "NewWorld-Manager 4.1.3" ]]
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "4.1.2" ]]
+[[ "$VERSION" == "4.1.3" ]]
 valid_instance_id 1
 valid_instance_id 999
 if valid_instance_id 0; then exit 1; fi

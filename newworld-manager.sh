@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.2"
+readonly VERSION="4.1.3"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -776,6 +776,7 @@ EOF
 install_snell() {
     local target_protocol instance meta port bind current_protocol
     migrate_proxy_legacy snell
+    show_existing_instances snell
     read -r -p '实例编号（1-999；已有实例将更新二进制）: ' instance
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     target_protocol="$(select_snell_protocol 5)"
@@ -845,7 +846,8 @@ configure_ss() {
 install_ss() {
     local instance meta port bind
     migrate_proxy_legacy ss2022
-    read -r -p 'Instance ID (1-999; existing instance updates binary): ' instance
+    show_existing_instances ss2022
+    read -r -p '实例编号（1-999；已有实例将更新二进制）: ' instance
     valid_instance_id "$instance" || die "Invalid instance ID."
     install_ss_binary
     if [[ -d "$(ss_instance_dir "$instance")" ]]; then
