@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.6"
+readonly VERSION="4.1.7"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -998,7 +998,7 @@ $(cat "$env")
 }
 
 install_stls() {
-    local instance meta port action
+    local instance meta port action updated=0
     shadowtls_migrate_legacy
     if [[ -n "$(shadowtls_instance_dirs)" ]]; then
         printf 'ShadowTLS：1) 新建实例  2) 更新全部已有实例\n'
@@ -1009,8 +1009,14 @@ install_stls() {
             *) die "选择无效。" ;;
         esac
     fi
-    install_stls_binary
     if [[ -n "$(shadowtls_instance_dirs)" ]]; then
+        RELEASE_CHECK_ONLY=true download_github_release ihciah/shadow-tls "$(stls_asset_pattern)" /dev/null
+        STLS_VERSION="$DOWNLOADED_VERSION"
+        while read -r instance; do
+            [[ -z "$instance" ]] || [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" VERSION)" != "$STLS_VERSION" ]] && updated=$((updated + 1))
+        done < <(shadowtls_instance_dirs)
+        ((updated > 0)) || { ok "ShadowTLS 已是最新版本：$STLS_VERSION（无需更新）。"; return; }
+        install_stls_binary
         while read -r instance; do
             [[ -z "$instance" ]] && continue
             meta="$(shadowtls_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"
@@ -1020,7 +1026,7 @@ install_stls() {
             firewall_open "$port" tcp
         done < <(shadowtls_instance_dirs)
         ok "已更新全部 ShadowTLS 实例到 $STLS_VERSION。"
-    else configure_stls; fi
+    else install_stls_binary; configure_stls; fi
 }
 
 enable_bbr() {
