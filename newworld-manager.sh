@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# NewWorld Manager
+# NewWorld-Manager
 # Independent Linux manager for BBR, Snell, Shadowsocks 2022 and ShadowTLS.
 # It never downloads or executes third-party installation scripts.
 
 set -Eeuo pipefail
 umask 027
 
-readonly APP="NewWorld Manager"
-readonly VERSION="3.3.5"
-readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh"
+readonly APP="NewWorld-Manager"
+readonly VERSION="3.3.6"
+readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
 readonly BIN_DIR="/usr/local/bin"
@@ -1033,7 +1033,7 @@ check_manager_update() {
     local remote_script remote_version target="/usr/local/sbin/newworld-manager"
     ensure_dependencies self-install
     new_temp_file remote_script
-    info "检查 NewWorld Manager 更新。"
+    info "检查 NewWorld-Manager 更新。"
     download "${SOURCE_URL}?cache=${RANDOM}-$$" "$remote_script"
     bash -n "$remote_script" || die "远端脚本语法检查失败，已取消更新。"
     remote_version="$(sed -nE 's/^readonly VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' "$remote_script" | head -n1)"

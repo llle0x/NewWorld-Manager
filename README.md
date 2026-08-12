@@ -1,4 +1,4 @@
-# NewWorld Manager
+# NewWorld-Manager
 
 一个完全独立实现的 Linux 管理脚本，用于管理：
 
@@ -55,13 +55,13 @@ Snell 协议直接使用 `5/6` 选择对应版本；布尔项、DNS IP 偏好、
 直接打开交互菜单：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh)"
 ```
 
 或下载后运行：
 
 ```bash
-curl -fsSLo newworld-manager.sh https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh
+curl -fsSLo newworld-manager.sh https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh
 chmod +x newworld-manager.sh
 sudo ./newworld-manager.sh
 ```
