@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.11"
+readonly VERSION="4.2.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -1145,9 +1145,22 @@ show_status() {
 show_config() {
     local component="$1" requested_instance="${2:-}" instance config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
     require_root
+    if [[ -z "$requested_instance" ]]; then
+        case "$component" in
+            snell)
+                while read -r instance; do [[ -z "$instance" ]] || show_config snell "$instance"; done < <(proxy_instance_dirs snell)
+                return ;;
+            ss|ss2022)
+                while read -r instance; do [[ -z "$instance" ]] || show_config ss2022 "$instance"; done < <(proxy_instance_dirs ss2022)
+                return ;;
+            shadowtls)
+                while read -r instance; do [[ -z "$instance" ]] || show_config shadowtls "$instance"; done < <(shadowtls_instance_dirs)
+                return ;;
+        esac
+    fi
     case "$component" in
         snell)
-            [[ -n "$requested_instance" ]] || requested_instance="$(select_proxy_instance snell)"; instance="$requested_instance"
+            instance="$requested_instance"
             config="$(snell_instance_dir "$instance")/snell.conf"; meta="$(snell_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "未安装。"
             port="$(read_meta "$meta" PORT)"
             psk="$(sed -nE 's/^psk[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
@@ -1169,7 +1182,7 @@ show_config() {
             print_config_block "Snell 客户端配置（Surge [Proxy]${stls_options:+，经 ShadowTLS v3}）" "$client_config"
             print_config_block "Snell 服务器配置（实例 $instance，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
         ss|ss2022)
-            [[ -n "$requested_instance" ]] || requested_instance="$(select_proxy_instance ss2022)"; instance="$requested_instance"
+            instance="$requested_instance"
             config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "未安装。"
             method="$(jq -er '.method' "$config")"; password="$(jq -er '.password' "$config")"; port="$(jq -er '.server_port' "$config")"
             external_port="$port"
@@ -1186,7 +1199,7 @@ show_config() {
             print_config_block 'SS-2022 服务器配置' "$(jq . "$config")" ;;
         shadowtls)
             shadowtls_migrate_legacy
-            target="${2:-}"; [[ -n "$target" ]] || target="$(select_shadowtls_instance)"
+            target="$requested_instance"
             config="$(shadowtls_instance_dir "$target")/environment"; [[ -f "$config" ]] || die "实例不存在。"
             print_config_block "ShadowTLS v3 完整服务器配置（实例 $target）" "地址 = $(public_ip)
 $(cat "$config")
