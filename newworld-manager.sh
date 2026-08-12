@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld Manager"
-readonly VERSION="3.3.2"
+readonly VERSION="3.3.3"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/world-manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -203,6 +203,15 @@ random_base64() {
     else head -c "$bytes" /dev/urandom | base64 | tr -d '\n'; fi
 }
 
+base64url() { base64 | tr '+/' '-_' | tr -d '=\n'; }
+
+print_config_block() {
+    local title="$1" content="$2"
+    printf '\n========== %s ==========' "$title"
+    printf '\n%s\n' "$content"
+    printf '%s\n' '================================'
+}
+
 architecture() {
     case "$(uname -m)" in
         x86_64|amd64) printf 'x86_64' ;;
@@ -227,7 +236,7 @@ ensure_dependencies() {
     case "$profile" in
         base|bbr) return 0 ;;
         snell) commands=(curl unzip openssl ss) ;;
-        ss|ss2022) commands=(curl jq tar xz openssl sha256sum ss) ;;
+        ss|ss2022) commands=(base64 curl jq tar xz openssl sha256sum ss) ;;
         shadowtls) commands=(curl jq openssl sha256sum ss) ;;
         self-install) commands=(curl) ;;
         *) die "未知的依赖配置：$profile" ;;
@@ -247,7 +256,7 @@ ensure_dependencies() {
         case "$manager:$command" in
             apt:xz) package=xz-utils;; apt:ss) package=iproute2;;
             dnf:ss|yum:ss) package=iproute;; apk:ss) package=iproute2;;
-            *:sha256sum) package=coreutils;;
+            *:base64|*:sha256sum) package=coreutils;;
             *) package="$command";;
         esac
         [[ " ${packages[*]} " == *" $package "* ]] || packages+=("$package")
@@ -619,10 +628,12 @@ EOF
     reload_start "$SNELL_SERVICE"
     firewall_open "$port" tcp
     [[ "$protocol" != 5 ]] || firewall_open "$port" udp
-    printf '\nSurge 配置：\n%s = snell, %s, %s, psk=%s, version=%s, tfo=%s, reuse=true, ecn=true' "$(hostname)" "$(public_ip)" "$port" "$psk" "$protocol" "$tfo"
-    [[ "$protocol" == 6 && "$mode" != default ]] && printf ', mode=%s' "$mode"
-    [[ "$protocol" == 5 && "$obfs" == http ]] && printf ', obfs=http, obfs-host=%s' "$obfs_host"
-    printf '\nServerVersion：%s\n' "${SNELL_VERSION:-unknown}"
+    local surge_config
+    surge_config="$(hostname) = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
+    [[ "$protocol" == 6 && "$mode" != default ]] && surge_config+=", mode=${mode}"
+    [[ "$protocol" == 5 && "$obfs" == http ]] && surge_config+=", obfs=http, obfs-host=${obfs_host}"
+    print_config_block 'Snell 客户端配置（Surge [Proxy]）' "$surge_config"
+    print_config_block "Snell 服务器配置（${SNELL_VERSION:-unknown}）" "$(cat "$config")"
 }
 
 install_snell() {
@@ -707,7 +718,10 @@ configure_ss() {
     write_meta "$meta" "VERSION=${SS_VERSION:-unknown}" "PORT=$port" "BIND=$bind"
     write_service "$SS_SERVICE" "NewWorld Shadowsocks 2022 Server" "$SS_BIN -c $config"
     reload_start "$SS_SERVICE"; firewall_open "$port" tcp; firewall_open "$port" udp
-    printf '\nss-2022：%s:%s\nMethod：%s\nPassword：%s\n' "$(public_ip)" "$port" "$method" "$password"
+    local ss_url
+    ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
+    print_config_block 'SS-2022 客户端链接' "$ss_url"
+    print_config_block 'SS-2022 服务器配置' "$(cat "$config")"
 }
 
 install_ss() {
@@ -789,7 +803,9 @@ configure_stls() {
     write_service "$STLS_SERVICE" "NewWorld ShadowTLS v3 Server" \
         "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
     reload_start "$STLS_SERVICE"; firewall_open "$listen_port" tcp
-    printf '\nShadowTLS：%s:%s\nPassword：%s\nSNI：%s\n后端：%s:%s\n' "$(public_ip)" "$listen_port" "$password" "$tls_host" "$target" "$backend_port"
+    print_config_block 'ShadowTLS v3 完整服务器配置' "地址 = $(public_ip)
+$(cat "$env")
+后端 = ${target} (127.0.0.1:${backend_port})"
 }
 
 install_stls() {

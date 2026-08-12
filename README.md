@@ -9,6 +9,8 @@
 
 组件程序仅从各自官方发布源下载，不执行第三方安装脚本。
 
+安装完成后会在终端输出完整配置块：Snell 包含可放进 Surge `[Proxy]` 的配置行和服务端配置；SS-2022 包含可导入的 `ss://` 链接和服务端 JSON；ShadowTLS 包含完整端点、密码、SNI 和后端信息。请妥善保存，不要公开分享密钥。
+
 ## 安全设计
 
 - BBR 使用独立的 `/etc/sysctl.d/99-newworld-bbr.conf`，不会覆盖 `/etc/sysctl.conf`。
