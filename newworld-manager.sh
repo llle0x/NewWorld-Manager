@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.2.0"
+readonly VERSION="4.2.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -433,7 +433,7 @@ verify_service_executable() {
         su -s /bin/sh -c "test -x '$binary'" "$SERVICE_USER"
     else
         [[ -x "$binary" && -x "$LIB_DIR" ]]
-    fi || die "$SERVICE_USER 无法执行 $binary；请检查文件及上级目录权限。"
+    fi || die "${SERVICE_USER} 无法执行 ${binary}；请检查文件及上级目录权限。"
 }
 
 download() {
@@ -585,11 +585,11 @@ firewall_open() {
     elif firewall_active firewalld; then
         tool=firewalld
     else
-        warn "未检测到启用的 UFW/firewalld，请在云防火墙中开放 $rule。"
+        warn "未检测到启用的 UFW/firewalld，请在云防火墙中开放 ${rule}。"
         return 0
     fi
     if firewall_rule_present "$tool" "$rule"; then
-        warn "$rule 已存在于 $tool；将保留为用户管理规则。"
+        warn "${rule} 已存在于 ${tool}；将保留为用户管理规则。"
         return 0
     fi
     case "$tool" in
@@ -597,7 +597,7 @@ firewall_open() {
         firewalld) firewall-cmd --permanent --add-port="$rule" >/dev/null; firewall-cmd --reload >/dev/null ;;
     esac
     grep -Fxq "$rule|$tool" "$FIREWALL_DB" || printf '%s|%s\n' "$rule" "$tool" >>"$FIREWALL_DB"
-    ok "已通过 $tool 开放 $rule。"
+    ok "已通过 ${tool} 开放 ${rule}。"
 }
 
 firewall_close() {
@@ -774,7 +774,7 @@ EOF
     surge_config="$(hostname) = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
     [[ "$protocol" == 6 && "$mode" != default ]] && surge_config+=", mode=${mode}"
     [[ "$protocol" == 5 && "$obfs" == http ]] && surge_config+=", obfs=http, obfs-host=${obfs_host}"
-    print_config_block "Snell 客户端配置（实例 $instance，Surge [Proxy]）" "$surge_config"
+    print_config_block "Snell 客户端配置（实例 ${instance}，Surge [Proxy]）" "$surge_config"
     print_config_block "Snell 服务器配置（${SNELL_VERSION:-unknown}）" "$(cat "$config")"
 }
 
@@ -808,7 +808,7 @@ install_snell() {
             write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
             updated=$((updated + 1))
         done < <(proxy_instance_dirs snell)
-        ok "已更新全部 $updated 个 Snell 实例到 $SNELL_VERSION。"
+        ok "已更新全部 ${updated} 个 Snell 实例到 ${SNELL_VERSION}。"
         return
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
@@ -825,7 +825,7 @@ install_snell() {
         port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
         restart_or_rollback "$(snell_service "$instance")" "$SNELL_BIN"
         write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
-        ok "Snell 实例 $instance 已更新到 $SNELL_VERSION。"
+        ok "Snell 实例 ${instance} 已更新到 ${SNELL_VERSION}。"
     else
         configure_snell "$target_protocol" "$instance"
     fi
@@ -900,7 +900,7 @@ install_ss() {
             firewall_open "$port" tcp; firewall_open "$port" udp; updated=$((updated + 1))
         done < <(proxy_instance_dirs ss2022)
         ((updated > 0)) || die "没有可更新的 SS-2022 实例。"
-        ok "已更新全部 $updated 个 SS-2022 实例到 $SS_VERSION。"
+        ok "已更新全部 ${updated} 个 SS-2022 实例到 ${SS_VERSION}。"
         return
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
@@ -913,7 +913,7 @@ install_ss() {
         restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
         write_meta "$meta" "VERSION=$SS_VERSION" "PORT=$port" "BIND=$bind"
         firewall_open "$port" tcp; firewall_open "$port" udp
-        ok "shadowsocks-rust 已更新到 $SS_VERSION。"
+        ok "shadowsocks-rust 已更新到 ${SS_VERSION}。"
     else configure_ss "$instance"; fi
 }
 
@@ -993,7 +993,7 @@ configure_stls() {
     write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" \
         "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
     reload_start "$service"; firewall_open "$listen_port" tcp
-    print_config_block "ShadowTLS v3 完整服务器配置（实例 $instance）" "地址 = $(public_ip)
+    print_config_block "ShadowTLS v3 完整服务器配置（实例 ${instance}）" "地址 = $(public_ip)
 $(cat "$env")
 后端 = ${target} (127.0.0.1:${backend_port})"
     show_config "$target" "$backend_instance"
@@ -1027,7 +1027,7 @@ install_stls() {
                 "BACKEND_PORT=$(read_meta "$meta" BACKEND_PORT)" "PREVIOUS_BIND=$(read_meta "$meta" PREVIOUS_BIND)"
             firewall_open "$port" tcp
         done < <(shadowtls_instance_dirs)
-        ok "已更新全部 ShadowTLS 实例到 $STLS_VERSION。"
+        ok "已更新全部 ShadowTLS 实例到 ${STLS_VERSION}。"
     else install_stls_binary; configure_stls; fi
 }
 
@@ -1180,7 +1180,7 @@ show_config() {
             [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
             [[ -z "$stls_options" ]] || client_config+=", ${stls_options}"
             print_config_block "Snell 客户端配置（Surge [Proxy]${stls_options:+，经 ShadowTLS v3}）" "$client_config"
-            print_config_block "Snell 服务器配置（实例 $instance，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
+            print_config_block "Snell 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
         ss|ss2022)
             instance="$requested_instance"
             config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "未安装。"
@@ -1201,7 +1201,7 @@ show_config() {
             shadowtls_migrate_legacy
             target="$requested_instance"
             config="$(shadowtls_instance_dir "$target")/environment"; [[ -f "$config" ]] || die "实例不存在。"
-            print_config_block "ShadowTLS v3 完整服务器配置（实例 $target）" "地址 = $(public_ip)
+            print_config_block "ShadowTLS v3 完整服务器配置（实例 ${target}）" "地址 = $(public_ip)
 $(cat "$config")
 后端 = $(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET 2>/dev/null || printf unknown) (127.0.0.1:$(read_meta "$(shadowtls_instance_dir "$target")/meta" BACKEND_PORT 2>/dev/null || printf unknown))"
             show_config "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET)" "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)" ;;
@@ -1269,7 +1269,7 @@ install_manager() {
     fi
     install -d -m 0755 /usr/local/sbin "$BIN_DIR"
     if [[ "$source" -ef "$target" ]]; then
-        info "管理脚本已位于 $target，跳过重复复制。"
+        info "管理脚本已位于 ${target}，跳过重复复制。"
     else
         install -m 0755 "$source" "$target"
     fi
@@ -1292,7 +1292,7 @@ check_manager_update() {
         return 0
     fi
     if ! version_is_newer "$remote_version" "$VERSION"; then
-        warn "远端版本 $remote_version 不高于当前版本 $VERSION，不执行更新。"
+        warn "远端版本 ${remote_version} 不高于当前版本 ${VERSION}，不执行更新。"
         return 0
     fi
     info "发现新版本：$VERSION → $remote_version"
@@ -1300,7 +1300,7 @@ check_manager_update() {
     install -d -m 0755 /usr/local/sbin "$BIN_DIR"
     install -m 0755 -o root -g root "$remote_script" "$target"
     ln -sfn "$target" "$BIN_DIR/nw-manager"
-    ok "已更新到 $remote_version；下次运行 nw-manager 时生效。"
+    ok "已更新到 ${remote_version}；下次运行 nw-manager 时生效。"
 }
 
 doctor() {
