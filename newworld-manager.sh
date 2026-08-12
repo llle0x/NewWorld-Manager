@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.0.0"
+readonly VERSION="4.1.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -20,6 +20,8 @@ readonly SS_BIN="$LIB_DIR/ssserver"
 readonly STLS_BIN="$LIB_DIR/shadow-tls"
 readonly SNELL_SERVICE="newworld-snell.service"
 readonly SS_SERVICE="newworld-ss2022.service"
+readonly SNELL_ROOT="$ROOT_DIR/snell"
+readonly SS_ROOT="$ROOT_DIR/ss2022"
 readonly STLS_SERVICE_PREFIX="newworld-shadowtls"
 readonly STLS_ROOT="$ROOT_DIR/shadowtls"
 readonly STLS_SERVICE="${STLS_SERVICE_PREFIX}.service" # Legacy service name used only during migration.
@@ -215,10 +217,13 @@ print_config_block() {
 }
 
 shadowtls_target_active() {
-    local target="$1" instance
+    local target="$1" backend_instance="${2:-}" instance candidate
     shadowtls_migrate_legacy
     while read -r instance; do
-        [[ -z "$instance" ]] || [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" != "$target" ]] || return 0
+        [[ -z "$instance" ]] && continue
+        [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" == "$target" ]] || continue
+        candidate="$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
+        [[ -z "$backend_instance" || "$candidate" == "$backend_instance" ]] && return 0
     done < <(shadowtls_instance_dirs)
     return 1
 }
@@ -233,12 +238,53 @@ shadowtls_service() { printf '%s-%s.service' "$STLS_SERVICE_PREFIX" "$1"; }
 shadowtls_instance_dir() { printf '%s/instances/%s' "$STLS_ROOT" "$1"; }
 valid_instance_id() { [[ "$1" =~ ^[1-9][0-9]{0,2}$ ]]; }
 
+snell_service() { printf 'newworld-snell-%s.service' "$1"; }
+ss_service() { printf 'newworld-ss2022-%s.service' "$1"; }
+snell_instance_dir() { printf '%s/instances/%s' "$SNELL_ROOT" "$1"; }
+ss_instance_dir() { printf '%s/instances/%s' "$SS_ROOT" "$1"; }
+
+migrate_proxy_legacy() {
+    local kind="$1" root instance_dir old_config old_meta service new_service
+    case "$kind" in
+        snell) root="$SNELL_ROOT"; old_config="$root/snell.conf"; old_meta="$root/meta"; service="$SNELL_SERVICE"; new_service="$(snell_service 1)" ;;
+        ss2022) root="$SS_ROOT"; old_config="$root/config.json"; old_meta="$root/meta"; service="$SS_SERVICE"; new_service="$(ss_service 1)" ;;
+        *) return 1 ;;
+    esac
+    [[ -f "$old_config" ]] || return 0
+    instance_dir="$root/instances/1"; install -d -m 0750 -o root -g "$SERVICE_USER" "$root/instances" "$instance_dir"
+    mv "$old_config" "$instance_dir/"
+    [[ ! -f "$old_meta" ]] || mv "$old_meta" "$instance_dir/"
+    systemctl disable --now "$service" >/dev/null 2>&1 || true; rm -f "$SYSTEMD_DIR/$service"
+    case "$kind" in
+        snell) write_service "$new_service" "NewWorld Snell Instance 1" "$SNELL_BIN -c $instance_dir/snell.conf" ;;
+        ss2022) write_service "$new_service" "NewWorld SS-2022 Instance 1" "$SS_BIN -c $instance_dir/config.json" ;;
+    esac
+    reload_start "$new_service"; ok "已将原 $kind 配置迁移为实例 1。"
+}
+
+proxy_instance_dirs() {
+    local kind="$1" root
+    migrate_proxy_legacy "$kind"
+    [[ "$kind" == snell ]] && root="$SNELL_ROOT" || root="$SS_ROOT"
+    find "$root/instances" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n
+}
+
+select_proxy_instance() {
+    local kind="$1" instance input instances=()
+    while read -r instance; do [[ -z "$instance" ]] || instances+=("$instance"); done < <(proxy_instance_dirs "$kind")
+    ((${#instances[@]})) || die "未安装 ${kind} 实例。"
+    printf '%s 实例：' "$kind" >&2; for instance in "${instances[@]}"; do printf ' %s)' "$instance" >&2; done; printf '\n' >&2
+    read -r -p '请选择实例编号: ' input; valid_instance_id "$input" || die "实例编号无效。"
+    [[ " ${instances[*]} " == *" $input "* ]] || die "实例不存在。"; printf '%s' "$input"
+}
+
 shadowtls_migrate_legacy() {
     local instance_dir
     [[ -f "$STLS_ROOT/environment" ]] || return 0
     instance_dir="$(shadowtls_instance_dir 1)"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$STLS_ROOT/instances" "$instance_dir"
     mv "$STLS_ROOT/environment" "$STLS_ROOT/meta" "$instance_dir/"
+    grep -q '^TARGET_INSTANCE=' "$instance_dir/meta" || printf 'TARGET_INSTANCE=1\n' >>"$instance_dir/meta"
     systemctl disable --now "${STLS_SERVICE_PREFIX}.service" >/dev/null 2>&1 || true
     rm -f "$SYSTEMD_DIR/${STLS_SERVICE_PREFIX}.service"
     write_service "$(shadowtls_service 1)" "NewWorld ShadowTLS v3 Instance 1" \
@@ -266,17 +312,23 @@ select_shadowtls_instance() {
 }
 
 shadowtls_first_instance_for_target() {
-    local target="$1" instance
+    local target="$1" backend_instance="${2:-}" instance candidate
     while read -r instance; do
-        [[ -z "$instance" ]] || [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" != "$target" ]] || { printf '%s' "$instance"; return 0; }
+        [[ -z "$instance" ]] && continue
+        [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" == "$target" ]] || continue
+        candidate="$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
+        [[ -z "$backend_instance" || "$candidate" == "$backend_instance" ]] && { printf '%s' "$instance"; return 0; }
     done < <(shadowtls_instance_dirs)
     return 1
 }
 
 shadowtls_backend_in_use() {
-    local target="$1" instance
+    local target="$1" backend_instance="${2:-}" instance candidate
     while read -r instance; do
-        [[ -z "$instance" ]] || [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" != "$target" ]] || return 0
+        [[ -z "$instance" ]] && continue
+        [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" == "$target" ]] || continue
+        candidate="$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
+        [[ -z "$backend_instance" || "$candidate" == "$backend_instance" ]] && return 0
     done < <(shadowtls_instance_dirs)
     return 1
 }
@@ -642,8 +694,13 @@ install_snell_binary() {
 }
 
 configure_snell() {
-    local protocol="${1:-}" port psk bind listen tfo dns config meta ipv6 obfs obfs_host dns_pref mode
-    config="$ROOT_DIR/snell/snell.conf"; meta="$ROOT_DIR/snell/meta"
+    local protocol="${1:-}" instance="${2:-}" port psk bind listen tfo dns config meta ipv6 obfs obfs_host dns_pref mode service
+    migrate_proxy_legacy snell
+    [[ -n "$instance" ]] || { read -r -p '实例编号（1-999）: ' instance; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    [[ ! -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 已存在。"
+    install -d -m 0750 -o root -g "$SERVICE_USER" "$SNELL_ROOT/instances" "$(snell_instance_dir "$instance")"
+    config="$(snell_instance_dir "$instance")/snell.conf"; meta="$(snell_instance_dir "$instance")/meta"
     if [[ -z "$protocol" ]]; then
         protocol="$(select_snell_protocol 5)"
     fi
@@ -693,60 +750,36 @@ EOF
         printf 'net.ipv4.tcp_fastopen = 3\n' >/etc/sysctl.d/99-newworld-snell.conf
         sysctl -p /etc/sysctl.d/99-newworld-snell.conf >/dev/null || warn "内核未接受 TCP Fast Open 参数。"
     else rm -f /etc/sysctl.d/99-newworld-snell.conf; fi
-    write_service "$SNELL_SERVICE" "NewWorld Snell Server" "$SNELL_BIN -c $config"
-    reload_start "$SNELL_SERVICE"
+    service="$(snell_service "$instance")"
+    write_service "$service" "NewWorld Snell Instance $instance" "$SNELL_BIN -c $config"
+    reload_start "$service"
     firewall_open "$port" tcp
     [[ "$protocol" != 5 ]] || firewall_open "$port" udp
     local surge_config
     surge_config="$(hostname) = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
     [[ "$protocol" == 6 && "$mode" != default ]] && surge_config+=", mode=${mode}"
     [[ "$protocol" == 5 && "$obfs" == http ]] && surge_config+=", obfs=http, obfs-host=${obfs_host}"
-    print_config_block 'Snell 客户端配置（Surge [Proxy]）' "$surge_config"
+    print_config_block "Snell 客户端配置（实例 $instance，Surge [Proxy]）" "$surge_config"
     print_config_block "Snell 服务器配置（${SNELL_VERSION:-unknown}）" "$(cat "$config")"
 }
 
 install_snell() {
-    local current_protocol target_protocol snapshot=""
-    current_protocol="$(read_meta "$ROOT_DIR/snell/meta" PROTOCOL 2>/dev/null || true)"
-    [[ -n "$current_protocol" ]] || current_protocol="$(read_meta "$ROOT_DIR/snell/meta" VERSION 2>/dev/null | sed -E 's/^v?([0-9]+).*/\1/' || true)"
-    if [[ -n "$current_protocol" ]]; then
-        target_protocol="$(select_snell_protocol "$current_protocol")"
+    local target_protocol instance meta port bind current_protocol
+    migrate_proxy_legacy snell
+    read -r -p '实例编号（1-999；已有实例将更新二进制）: ' instance
+    valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
+    target_protocol="$(select_snell_protocol 5)"
+    install_snell_binary "$target_protocol"
+    [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
+    if [[ -d "$(snell_instance_dir "$instance")" ]]; then
+        meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
+        [[ "$current_protocol" == "$target_protocol" ]] || die "Instance $instance protocol differs; reconfigure it to change protocol."
+        port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
+        restart_or_rollback "$(snell_service "$instance")" "$SNELL_BIN"
+        write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
+        ok "Snell 实例 $instance 已更新到 $SNELL_VERSION。"
     else
-        target_protocol="$(select_snell_protocol 5)"
-    fi
-    [[ "$target_protocol" == 5 || "$target_protocol" == 6 ]] || die "Snell 协议版本只能是 5 或 6。"
-    if [[ -n "$current_protocol" && "$target_protocol" != "$current_protocol" ]] && shadowtls_target_active snell; then
-        die "ShadowTLS 正在使用 Snell；切换协议前请先卸载 ShadowTLS。"
-    fi
-    [[ ! -f "$ROOT_DIR/snell/snell.conf" ]] || snapshot_manager_state snapshot
-    if (
-        local old_port
-        install_snell_binary "$target_protocol"
-        [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本；正式版发布后脚本会自动优先选择正式版。"
-        if [[ -f "$ROOT_DIR/snell/snell.conf" ]]; then
-            if [[ "$target_protocol" != "$current_protocol" ]]; then
-                warn "将从 Snell v${current_protocol} 切换到 v${target_protocol}，需要重新确认全部配置。"
-                systemctl stop "$SNELL_SERVICE" || true
-                old_port="$(read_meta "$ROOT_DIR/snell/meta" PORT)"; firewall_close "$old_port" tcp
-                [[ "$current_protocol" != 5 ]] || firewall_close "$old_port" udp
-                configure_snell "$target_protocol"
-            else
-                old_port="$(read_meta "$ROOT_DIR/snell/meta" PORT)"
-                write_service "$SNELL_SERVICE" "NewWorld Snell Server" "$SNELL_BIN -c $ROOT_DIR/snell/snell.conf"
-                systemctl daemon-reload
-                restart_or_rollback "$SNELL_SERVICE" "$SNELL_BIN"
-                write_meta "$ROOT_DIR/snell/meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$target_protocol" \
-                    "PORT=$old_port" "BIND=$(read_meta "$ROOT_DIR/snell/meta" BIND)"
-                firewall_open "$old_port" tcp
-                [[ "$target_protocol" != 5 ]] || firewall_open "$old_port" udp
-                ok "Snell v${target_protocol} 已更新到 $SNELL_VERSION。"
-            fi
-        else configure_snell "$target_protocol"; fi
-    ); then
-        [[ -z "$snapshot" ]] || rm -rf -- "$snapshot"
-    else
-        [[ -z "$snapshot" ]] || restore_manager_state "$snapshot"
-        die "Snell 安装或更新失败${snapshot:+，已恢复原版本}。"
+        configure_snell "$target_protocol" "$instance"
     fi
 }
 
@@ -774,7 +807,13 @@ install_ss_binary() {
 }
 
 configure_ss() {
-    local port password method bind config="$ROOT_DIR/ss2022/config.json" meta="$ROOT_DIR/ss2022/meta"
+    local instance="${1:-}" port password method bind config meta service
+    migrate_proxy_legacy ss2022
+    [[ -n "$instance" ]] || read -r -p 'Instance ID (1-999): ' instance
+    valid_instance_id "$instance" || die "Invalid instance ID."
+    [[ ! -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 instance $instance already exists."
+    install -d -m 0750 -o root -g "$SERVICE_USER" "$SS_ROOT/instances" "$(ss_instance_dir "$instance")"
+    config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"
     port="$(prompt_default '监听端口' "$(random_port)")"; valid_port "$port" || die "端口无效。"
     port_unused "$port" || die "端口 $port 已被占用。"
     method="$(prompt_default '加密方式' '2022-blake3-aes-256-gcm')"
@@ -784,8 +823,9 @@ configure_ss() {
         '{server:$server,server_port:$port,password:$password,method:$method,mode:"tcp_and_udp"}' >"$config"
     chown root:"$SERVICE_USER" "$config"; chmod 0640 "$config"
     write_meta "$meta" "VERSION=${SS_VERSION:-unknown}" "PORT=$port" "BIND=$bind"
-    write_service "$SS_SERVICE" "NewWorld Shadowsocks 2022 Server" "$SS_BIN -c $config"
-    reload_start "$SS_SERVICE"; firewall_open "$port" tcp; firewall_open "$port" udp
+    service="$(ss_service "$instance")"
+    write_service "$service" "NewWorld SS-2022 Instance $instance" "$SS_BIN -c $config"
+    reload_start "$service"; firewall_open "$port" tcp; firewall_open "$port" udp
     local ss_url
     ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
     print_config_block 'SS-2022 客户端链接' "$ss_url"
@@ -793,16 +833,18 @@ configure_ss() {
 }
 
 install_ss() {
+    local instance meta port bind
+    migrate_proxy_legacy ss2022
+    read -r -p 'Instance ID (1-999; existing instance updates binary): ' instance
+    valid_instance_id "$instance" || die "Invalid instance ID."
     install_ss_binary
-    if [[ -f "$ROOT_DIR/ss2022/config.json" ]]; then
-        local port bind
-        port="$(read_meta "$ROOT_DIR/ss2022/meta" PORT)"
-        bind="$(read_meta "$ROOT_DIR/ss2022/meta" BIND)"
-        restart_or_rollback "$SS_SERVICE" "$SS_BIN"
-        write_meta "$ROOT_DIR/ss2022/meta" "VERSION=$SS_VERSION" "PORT=$port" "BIND=$bind"
+    if [[ -d "$(ss_instance_dir "$instance")" ]]; then
+        meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
+        restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
+        write_meta "$meta" "VERSION=$SS_VERSION" "PORT=$port" "BIND=$bind"
         firewall_open "$port" tcp; firewall_open "$port" udp
         ok "shadowsocks-rust 已更新到 $SS_VERSION。"
-    else configure_ss; fi
+    else configure_ss "$instance"; fi
 }
 
 stls_asset_pattern() {
@@ -826,38 +868,42 @@ install_stls_binary() {
 }
 
 set_backend_bind() {
-    local target="$1" bind="$2" port tmp protocol listen
+    local target="$1" instance="$2" bind="$3" port tmp protocol listen dir meta config service
     case "$target" in
         snell)
-            port="$(read_meta "$ROOT_DIR/snell/meta" PORT)"
-            protocol="$(read_meta "$ROOT_DIR/snell/meta" PROTOCOL 2>/dev/null || printf 5)"
+            dir="$(snell_instance_dir "$instance")"; meta="$dir/meta"; config="$dir/snell.conf"; service="$(snell_service "$instance")"
+            port="$(read_meta "$meta" PORT)"
+            protocol="$(read_meta "$meta" PROTOCOL 2>/dev/null || printf 5)"
             if [[ "$bind" == dual ]]; then listen="0.0.0.0:${port},[::]:${port}"; else listen="${bind}:${port}"; fi
-            sed -Ei "s|^listen[[:space:]]*=.*|listen = ${listen}|" "$ROOT_DIR/snell/snell.conf"
-            write_meta "$ROOT_DIR/snell/meta" "VERSION=$(read_meta "$ROOT_DIR/snell/meta" VERSION)" "PROTOCOL=$protocol" "PORT=$port" "BIND=$bind"
-            systemctl restart "$SNELL_SERVICE" ;;
+            sed -Ei "s|^listen[[:space:]]*=.*|listen = ${listen}|" "$config"
+            write_meta "$meta" "VERSION=$(read_meta "$meta" VERSION)" "PROTOCOL=$protocol" "PORT=$port" "BIND=$bind"
+            systemctl restart "$service" ;;
         ss2022)
-            port="$(read_meta "$ROOT_DIR/ss2022/meta" PORT)"
-            new_temp_file tmp; jq --arg bind "$bind" '.server=$bind' "$ROOT_DIR/ss2022/config.json" >"$tmp"
-            install -m 0640 -o root -g "$SERVICE_USER" "$tmp" "$ROOT_DIR/ss2022/config.json"; rm -f "$tmp"
-            write_meta "$ROOT_DIR/ss2022/meta" "VERSION=$(read_meta "$ROOT_DIR/ss2022/meta" VERSION)" "PORT=$port" "BIND=$bind"
-            systemctl restart "$SS_SERVICE" ;;
+            dir="$(ss_instance_dir "$instance")"; meta="$dir/meta"; config="$dir/config.json"; service="$(ss_service "$instance")"
+            port="$(read_meta "$meta" PORT)"
+            new_temp_file tmp; jq --arg bind "$bind" '.server=$bind' "$config" >"$tmp"
+            install -m 0640 -o root -g "$SERVICE_USER" "$tmp" "$config"; rm -f "$tmp"
+            write_meta "$meta" "VERSION=$(read_meta "$meta" VERSION)" "PORT=$port" "BIND=$bind"
+            systemctl restart "$service" ;;
     esac
 }
 
 configure_stls() {
-    local instance target listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
+    local instance target backend_instance backend_dir listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
     shadowtls_migrate_legacy
     read -r -p '实例编号（1-999）: ' instance
     valid_instance_id "$instance" || die "实例编号必须为 1-999 的正整数。"
     [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "实例 $instance 已存在；请先卸载该实例，或使用更新功能。"
     printf '后端：1) Snell  2) ss-2022\n'; read -r -p '请选择 [1-2]: ' target
     case "$target" in
-        1) target=snell; [[ -f "$ROOT_DIR/snell/meta" ]] || die "请先安装 Snell。" ;;
-        2) target=ss2022; [[ -f "$ROOT_DIR/ss2022/meta" ]] || die "请先安装 ss-2022。" ;;
+        1) target=snell ;;
+        2) target=ss2022 ;;
         *) die "选择无效。" ;;
     esac
-    backend_port="$(read_meta "$ROOT_DIR/$target/meta" PORT)"
-    previous_bind="$(read_meta "$ROOT_DIR/$target/meta" BIND)"
+    backend_instance="$(select_proxy_instance "$target")"
+    if [[ "$target" == snell ]]; then backend_dir="$(snell_instance_dir "$backend_instance")"; else backend_dir="$(ss_instance_dir "$backend_instance")"; fi
+    backend_port="$(read_meta "$backend_dir/meta" PORT)"
+    previous_bind="$(read_meta "$backend_dir/meta" BIND)"
     listen_port="$(prompt_default 'ShadowTLS 监听端口' '443')"; valid_port "$listen_port" || die "端口无效。"
     port_unused "$listen_port" || die "端口 $listen_port 已被占用。"
     tls_host="$(prompt_default 'TLS 伪装域名（必须支持 TLS 1.3）' 'www.microsoft.com')"
@@ -865,12 +911,12 @@ configure_stls() {
     install -d -m 0750 -o root -g "$SERVICE_USER" "$STLS_ROOT/instances" "$(shadowtls_instance_dir "$instance")"
     password="$(random_text 32)"; env="$(shadowtls_instance_dir "$instance")/environment"; meta="$(shadowtls_instance_dir "$instance")/meta"
     write_meta "$env" "LISTEN_PORT=$listen_port" "BACKEND_PORT=$backend_port" "TLS_HOST=$tls_host" "PASSWORD=$password" "MONOIO_FORCE_LEGACY_DRIVER=1"
-    write_meta "$meta" "VERSION=${STLS_VERSION:-unknown}" "TARGET=$target" "PORT=$listen_port" "BACKEND_PORT=$backend_port" "PREVIOUS_BIND=$previous_bind"
-    if ! shadowtls_backend_in_use "$target"; then first_for_backend=true; set_backend_bind "$target" "127.0.0.1"; firewall_close "$backend_port" tcp; fi
+    write_meta "$meta" "VERSION=${STLS_VERSION:-unknown}" "TARGET=$target" "TARGET_INSTANCE=$backend_instance" "PORT=$listen_port" "BACKEND_PORT=$backend_port" "PREVIOUS_BIND=$previous_bind"
+    if ! shadowtls_backend_in_use "$target" "$backend_instance"; then first_for_backend=true; set_backend_bind "$target" "$backend_instance" "127.0.0.1"; firewall_close "$backend_port" tcp; fi
     if [[ "$first_for_backend" == true && "$target" == ss2022 ]]; then
         firewall_close "$backend_port" udp
     elif [[ "$first_for_backend" == true ]]; then
-        backend_protocol="$(read_meta "$ROOT_DIR/snell/meta" PROTOCOL 2>/dev/null || printf 5)"
+        backend_protocol="$(read_meta "$backend_dir/meta" PROTOCOL 2>/dev/null || printf 5)"
         [[ "$backend_protocol" != 5 ]] || firewall_close "$backend_port" udp
     fi
     service="$(shadowtls_service "$instance")"
@@ -880,7 +926,7 @@ configure_stls() {
     print_config_block "ShadowTLS v3 完整服务器配置（实例 $instance）" "地址 = $(public_ip)
 $(cat "$env")
 后端 = ${target} (127.0.0.1:${backend_port})"
-    show_config "$target" "$instance"
+    show_config "$target" "$backend_instance"
 }
 
 install_stls() {
@@ -892,7 +938,7 @@ install_stls() {
             [[ -z "$instance" ]] && continue
             meta="$(shadowtls_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"
             restart_or_rollback "$(shadowtls_service "$instance")" "$STLS_BIN"
-            write_meta "$meta" "VERSION=$STLS_VERSION" "TARGET=$(read_meta "$meta" TARGET)" "PORT=$port" \
+            write_meta "$meta" "VERSION=$STLS_VERSION" "TARGET=$(read_meta "$meta" TARGET)" "TARGET_INSTANCE=$(read_meta "$meta" TARGET_INSTANCE 2>/dev/null || printf 1)" "PORT=$port" \
                 "BACKEND_PORT=$(read_meta "$meta" BACKEND_PORT)" "PREVIOUS_BIND=$(read_meta "$meta" PREVIOUS_BIND)"
             firewall_open "$port" tcp
         done < <(shadowtls_instance_dirs)
@@ -923,34 +969,38 @@ disable_bbr() {
 }
 
 remove_component() {
-    local component="$1" target previous port protocol instance instance_dir
+    local component="$1" target previous target_instance port protocol instance instance_dir
     confirm "确定卸载 $component 及其配置？" || { warn "已取消。"; return 0; }
     case "$component" in
         snell)
-            shadowtls_target_active snell && die "仍有 ShadowTLS 实例正在使用 Snell，请先卸载对应实例。"
-            systemctl disable --now "$SNELL_SERVICE" >/dev/null 2>&1 || true
-            port="$(read_meta "$ROOT_DIR/snell/meta" PORT 2>/dev/null || true)"
-            protocol="$(read_meta "$ROOT_DIR/snell/meta" PROTOCOL 2>/dev/null || printf 5)"
-            [[ -z "$port" ]] || { firewall_close "$port" tcp; [[ "$protocol" != 5 ]] || firewall_close "$port" udp; }
-            rm -f "$SYSTEMD_DIR/$SNELL_SERVICE" "$SNELL_BIN" "${SNELL_BIN}.previous" /etc/sysctl.d/99-newworld-snell.conf; rm -rf "$ROOT_DIR/snell" ;;
+            migrate_proxy_legacy snell; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"
+            shadowtls_target_active snell "$instance" && die "该 Snell 实例仍被 ShadowTLS 使用。"
+            instance_dir="$(snell_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
+            port="$(read_meta "$instance_dir/meta" PORT)"; protocol="$(read_meta "$instance_dir/meta" PROTOCOL 2>/dev/null || printf 5)"
+            systemctl disable --now "$(snell_service "$instance")" >/dev/null 2>&1 || true; firewall_close "$port" tcp; [[ "$protocol" != 5 ]] || firewall_close "$port" udp
+            rm -f "$SYSTEMD_DIR/$(snell_service "$instance")"; rm -rf "$instance_dir"
+            [[ -n "$(proxy_instance_dirs snell)" ]] || { rm -f "$SNELL_BIN" "${SNELL_BIN}.previous" /etc/sysctl.d/99-newworld-snell.conf; rm -rf "$SNELL_ROOT"; } ;;
         ss|ss2022)
-            shadowtls_target_active ss2022 && die "仍有 ShadowTLS 实例正在使用 ss-2022，请先卸载对应实例。"
-            systemctl disable --now "$SS_SERVICE" >/dev/null 2>&1 || true
-            port="$(read_meta "$ROOT_DIR/ss2022/meta" PORT 2>/dev/null || true)"; [[ -n "$port" ]] && { firewall_close "$port" tcp; firewall_close "$port" udp; }
-            rm -f "$SYSTEMD_DIR/$SS_SERVICE" "$SS_BIN" "${SS_BIN}.previous"; rm -rf "$ROOT_DIR/ss2022" ;;
+            migrate_proxy_legacy ss2022; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"
+            shadowtls_target_active ss2022 "$instance" && die "该 SS-2022 实例仍被 ShadowTLS 使用。"
+            instance_dir="$(ss_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
+            port="$(read_meta "$instance_dir/meta" PORT)"; systemctl disable --now "$(ss_service "$instance")" >/dev/null 2>&1 || true
+            firewall_close "$port" tcp; firewall_close "$port" udp; rm -f "$SYSTEMD_DIR/$(ss_service "$instance")"; rm -rf "$instance_dir"
+            [[ -n "$(proxy_instance_dirs ss2022)" ]] || { rm -f "$SS_BIN" "${SS_BIN}.previous"; rm -rf "$SS_ROOT"; } ;;
         shadowtls)
             shadowtls_migrate_legacy
             instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"
             valid_instance_id "$instance" || die "实例编号无效。"
             instance_dir="$(shadowtls_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
-            target="$(read_meta "$instance_dir/meta" TARGET)"; previous="$(read_meta "$instance_dir/meta" PREVIOUS_BIND)"
+            target="$(read_meta "$instance_dir/meta" TARGET)"; previous="$(read_meta "$instance_dir/meta" PREVIOUS_BIND)"; target_instance="$(read_meta "$instance_dir/meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
             port="$(read_meta "$instance_dir/meta" PORT)"; systemctl disable --now "$(shadowtls_service "$instance")" >/dev/null 2>&1 || true
             firewall_close "$port" tcp; rm -f "$SYSTEMD_DIR/$(shadowtls_service "$instance")"; rm -rf "$instance_dir"
-            if ! shadowtls_backend_in_use "$target" && [[ -n "$target" && -n "$previous" && -d "$ROOT_DIR/$target" ]]; then
-                set_backend_bind "$target" "$previous"
-                port="$(read_meta "$ROOT_DIR/$target/meta" PORT)"; firewall_open "$port" tcp
+            if ! shadowtls_backend_in_use "$target" "$target_instance" && [[ -n "$target" && -n "$previous" ]]; then
+                set_backend_bind "$target" "$target_instance" "$previous"
+                if [[ "$target" == snell ]]; then instance_dir="$(snell_instance_dir "$target_instance")"; else instance_dir="$(ss_instance_dir "$target_instance")"; fi
+                port="$(read_meta "$instance_dir/meta" PORT)"; firewall_open "$port" tcp
                 if [[ "$target" == ss2022 ]]; then firewall_open "$port" udp
-                else protocol="$(read_meta "$ROOT_DIR/snell/meta" PROTOCOL 2>/dev/null || printf 5)"; [[ "$protocol" != 5 ]] || firewall_open "$port" udp; fi
+                else protocol="$(read_meta "$instance_dir/meta" PROTOCOL 2>/dev/null || printf 5)"; [[ "$protocol" != 5 ]] || firewall_open "$port" udp; fi
             fi
             if [[ -z "$(shadowtls_instance_dirs)" ]]; then rm -f "$STLS_BIN" "${STLS_BIN}.previous"; rm -rf "$STLS_ROOT"; fi ;;
         bbr) disable_bbr; return 0 ;;
@@ -961,15 +1011,19 @@ remove_component() {
 }
 
 component_service() {
-    case "$1" in snell) printf '%s' "$SNELL_SERVICE";; ss|ss2022) printf '%s' "$SS_SERVICE";; shadowtls) printf '%s' "$STLS_SERVICE";; *) return 1;; esac
+    local component="$1" instance="${2:-}"
+    case "$component" in
+        snell) [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"; snell_service "$instance" ;;
+        ss|ss2022) [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; ss_service "$instance" ;;
+        shadowtls) [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; shadowtls_service "$instance" ;;
+        *) return 1 ;;
+    esac
 }
 
 select_component_service() {
     local component
     component="$(select_component)"
-    if [[ "$component" == shadowtls ]]; then shadowtls_service "$(select_shadowtls_instance)"
-    else component_service "$component"
-    fi
+    component_service "$component"
 }
 
 service_state() {
@@ -983,8 +1037,15 @@ show_status() {
     local algo qdisc instance instance_dir
     printf '\n%s%s %s%s\n' "$BOLD" "$APP" "$VERSION" "$RESET"
     printf '%-16s %-12s %-14s\n' '组件' '状态' '版本'
-    printf '%-16s %-12s %-14s\n' 'Snell' "$(service_state "$SNELL_SERVICE")" "$(read_meta "$ROOT_DIR/snell/meta" VERSION 2>/dev/null || printf '-')"
-    printf '%-16s %-12s %-14s\n' 'ss-2022' "$(service_state "$SS_SERVICE")" "$(read_meta "$ROOT_DIR/ss2022/meta" VERSION 2>/dev/null || printf '-')"
+    migrate_proxy_legacy snell; migrate_proxy_legacy ss2022
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; instance_dir="$(snell_instance_dir "$instance")"
+        printf '%-16s %-12s %-14s\n' "Snell #$instance" "$(service_state "$(snell_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
+    done < <(proxy_instance_dirs snell)
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; instance_dir="$(ss_instance_dir "$instance")"
+        printf '%-16s %-12s %-14s\n' "ss-2022 #$instance" "$(service_state "$(ss_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
+    done < <(proxy_instance_dirs ss2022)
     shadowtls_migrate_legacy
     while read -r instance; do
         [[ -z "$instance" ]] && continue
@@ -997,12 +1058,13 @@ show_status() {
 }
 
 show_config() {
-    local component="$1" config port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
+    local component="$1" requested_instance="${2:-}" instance config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
     require_root
     case "$component" in
         snell)
-            config="$ROOT_DIR/snell/snell.conf"; [[ -f "$config" ]] || die "未安装。"
-            port="$(read_meta "$ROOT_DIR/snell/meta" PORT)"
+            [[ -n "$requested_instance" ]] || requested_instance="$(select_proxy_instance snell)"; instance="$requested_instance"
+            config="$(snell_instance_dir "$instance")/snell.conf"; meta="$(snell_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "未安装。"
+            port="$(read_meta "$meta" PORT)"
             psk="$(sed -nE 's/^psk[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             protocol="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*([0-9]+)$/\1/p' "$config")"
             tfo="$(sed -nE 's/^tfo[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
@@ -1010,8 +1072,8 @@ show_config() {
             obfs="$(sed -nE 's/^obfs[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             obfs_host="$(sed -nE 's/^obfs-host[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             external_port="$port"
-            if shadowtls_target_active snell; then
-                target="$(shadowtls_first_instance_for_target snell)"
+            if shadowtls_target_active snell "$instance"; then
+                target="$(shadowtls_first_instance_for_target snell "$instance")"
                 external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
                 stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
             else stls_options=""; fi
@@ -1020,13 +1082,14 @@ show_config() {
             [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
             [[ -z "$stls_options" ]] || client_config+=", ${stls_options}"
             print_config_block "Snell 客户端配置（Surge [Proxy]${stls_options:+，经 ShadowTLS v3}）" "$client_config"
-            print_config_block "Snell 服务器配置（$(read_meta "$ROOT_DIR/snell/meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
+            print_config_block "Snell 服务器配置（实例 $instance，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
         ss|ss2022)
-            config="$ROOT_DIR/ss2022/config.json"; [[ -f "$config" ]] || die "未安装。"
+            [[ -n "$requested_instance" ]] || requested_instance="$(select_proxy_instance ss2022)"; instance="$requested_instance"
+            config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "未安装。"
             method="$(jq -er '.method' "$config")"; password="$(jq -er '.password' "$config")"; port="$(jq -er '.server_port' "$config")"
             external_port="$port"
-            if shadowtls_target_active ss2022; then
-                target="$(shadowtls_first_instance_for_target ss2022)"
+            if shadowtls_target_active ss2022 "$instance"; then
+                target="$(shadowtls_first_instance_for_target ss2022 "$instance")"
                 external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
                 stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
                 client_config="$(hostname) = ss, $(public_ip), ${external_port}, encrypt-method=${method}, password=${password}, ${stls_options}"
@@ -1043,13 +1106,23 @@ show_config() {
             print_config_block "ShadowTLS v3 完整服务器配置（实例 $target）" "地址 = $(public_ip)
 $(cat "$config")
 后端 = $(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET 2>/dev/null || printf unknown) (127.0.0.1:$(read_meta "$(shadowtls_instance_dir "$target")/meta" BACKEND_PORT 2>/dev/null || printf unknown))"
-            show_config "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET)" ;;
+            show_config "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET)" "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)" ;;
         *) die "未知组件。" ;;
     esac
 }
 
 reconfigure_component() {
-    local component="$1" snapshot
+    local component="$1" snapshot instance version protocol
+    case "$component" in
+        snell)
+            instance="$(select_proxy_instance snell)"; shadowtls_target_active snell "$instance" && die "该实例正在被 ShadowTLS 使用。"
+            version="$(read_meta "$(snell_instance_dir "$instance")/meta" VERSION)"; protocol="$(read_meta "$(snell_instance_dir "$instance")/meta" PROTOCOL)"
+            YES=true; remove_component snell "$instance"; SNELL_VERSION="$version"; configure_snell "$protocol" "$instance"; return ;;
+        ss|ss2022)
+            instance="$(select_proxy_instance ss2022)"; shadowtls_target_active ss2022 "$instance" && die "该实例正在被 ShadowTLS 使用。"
+            version="$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)"
+            YES=true; remove_component ss2022 "$instance"; SS_VERSION="$version"; configure_ss "$instance"; return ;;
+    esac
     case "$component" in snell|ss|ss2022|shadowtls) ;; *) die "未知组件：$component" ;; esac
     snapshot_manager_state snapshot
     if (
@@ -1203,11 +1276,11 @@ main() {
             shift || true; require_root; require_systemd; ensure_service_user; make_layout; remove_component "$component" "${1:-}";;
         restart)
             component="${1:-}"; shift || true; require_root
-            if [[ "$component" == shadowtls ]]; then service="$(shadowtls_service "${1:-$(select_shadowtls_instance)}")"; else service="$(component_service "$component")" || die "未知组件。"; fi
+            service="$(component_service "$component" "${1:-}")" || die "未知组件。"
             systemctl restart "$service";;
         logs)
             component="${1:-}"; lines="${2:-100}"; [[ "$lines" =~ ^[1-9][0-9]*$ ]] || die "日志行数无效。"
-            if [[ "$component" == shadowtls ]]; then service="$(shadowtls_service "${3:-$(select_shadowtls_instance)}")"; else service="$(component_service "$component")" || die "未知组件。"; fi; journalctl -u "$service" -n "$lines" --no-pager;;
+            service="$(component_service "$component" "${3:-}")" || die "未知组件。"; journalctl -u "$service" -n "$lines" --no-pager;;
         config) component="${1:-}"; require_root; [[ "$component" != ss && "$component" != ss2022 ]] || ensure_dependencies ss2022; show_config "$component" "${2:-}";;
         configure)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"
