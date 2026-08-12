@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.1.0"
+readonly VERSION="4.1.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -930,9 +930,18 @@ $(cat "$env")
 }
 
 install_stls() {
-    install_stls_binary
+    local instance meta port action
     shadowtls_migrate_legacy
-    local instance meta port
+    if [[ -n "$(shadowtls_instance_dirs)" ]]; then
+        printf 'ShadowTLS：1) 新建实例  2) 更新全部已有实例\n'
+        read -r -p '请选择 [1-2，默认 1]: ' action; action="${action:-1}"
+        case "$action" in
+            1) install_stls_binary; configure_stls; return ;;
+            2) ;;
+            *) die "选择无效。" ;;
+        esac
+    fi
+    install_stls_binary
     if [[ -n "$(shadowtls_instance_dirs)" ]]; then
         while read -r instance; do
             [[ -z "$instance" ]] && continue

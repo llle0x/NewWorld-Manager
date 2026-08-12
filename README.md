@@ -13,6 +13,8 @@
 
 Snell、SS-2022 与 ShadowTLS 都支持多实例：每次安装可指定 `1-999` 的实例编号，每个实例拥有独立端口、配置文件及 systemd 服务。ShadowTLS 会明确绑定到某个 Snell 或 SS-2022 实例；同一后端实例也可套多个 ShadowTLS。原有单实例会在首次相关操作时自动迁移为实例 `1`。
 
+已有 ShadowTLS 实例时，菜单的“安装/更新 ShadowTLS”会先询问：`1` 新建实例（默认）或 `2` 更新全部已有实例。
+
 ## 安全设计
 
 - BBR 使用独立的 `/etc/sysctl.d/99-newworld-bbr.conf`，不会覆盖 `/etc/sysctl.conf`。
