@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.2.0"
+readonly VERSION="5.2.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -178,11 +178,20 @@ select_component() {
 }
 
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
-valid_host() { [[ "$1" =~ ^[A-Za-z0-9.-]+$ && "$1" == *.* && "$1" != .* && "$1" != *. ]]; }
+valid_host() {
+    local host="$1" label
+    local -a labels=()
+    [[ ${#host} -le 253 && "$host" == *.* && "$host" != .* && "$host" != *. && "$host" != *..* ]] || return 1
+    IFS=. read -r -a labels <<<"$host"
+    for label in "${labels[@]}"; do
+        [[ ${#label} -ge 1 && ${#label} -le 63 && "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+}
 valid_psk() { [[ ${#1} -ge 16 && ${#1} -le 255 && "$1" =~ ^[A-Za-z0-9._~-]+$ ]]; }
 valid_dns() { [[ "$1" =~ ^[A-Za-z0-9.,:_-]+$ ]]; }
 valid_uuid() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; }
 valid_ws_path() { [[ "$1" =~ ^/[A-Za-z0-9._~/%@:+-]*$ ]]; }
+valid_release_version() { [[ "$1" =~ ^v?[0-9]+([.][0-9A-Za-z]+)*([-+][0-9A-Za-z.-]+)?$ ]]; }
 port_unused() { ! ss -H -lntup 2>/dev/null | awk '{print $5}' | grep -Eq "(^|[.:])$1$"; }
 ipv6_available() {
     [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]] && [[ "$(</proc/sys/net/ipv6/conf/all/disable_ipv6)" == 0 ]] && ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '
@@ -302,7 +311,7 @@ proxy_instance_dirs() {
         vless) root="$VLESS_ROOT" ;;
         *) die "未知实例类型：$kind" ;;
     esac
-    find "$root/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -n || true
+    find "$root/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | awk '/^[1-9][0-9]?$/' | sort -n || true
 }
 
 snell_installed_protocol() {
@@ -371,7 +380,7 @@ shadowtls_migrate_legacy() {
 
 shadowtls_instance_dirs() {
     shadowtls_migrate_legacy
-    find "$STLS_ROOT/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -n || true
+    find "$STLS_ROOT/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | awk '/^[1-9][0-9]?$/' | sort -n || true
 }
 
 select_shadowtls_instance() {
@@ -523,8 +532,15 @@ download() {
 
 sha256() { sha256sum "$1" | awk '{print $1}'; }
 
+parse_sha256_file() {
+    awk '
+        /^[[:space:]]*[A-Fa-f0-9]{64}([[:space:]]|$)/ {print tolower($1); exit}
+        /^SHA2-256[[:space:]]*=/ {value=$0; sub(/^[^=]*=[[:space:]]*/, "", value); print tolower(value); exit}
+    ' "$1"
+}
+
 download_github_release() {
-    local repo="$1" pattern="$2" output="$3" json url digest count token_config="" token_args=()
+    local repo="$1" pattern="$2" output="$3" json url digest count asset_name sidecar_url="" sidecar="" expected="" token_config="" token_args=()
     new_temp_file json
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         [[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]] || die "GITHUB_TOKEN 格式无效。"
@@ -535,16 +551,30 @@ download_github_release() {
     curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "${token_args[@]}" \
         "https://api.github.com/repos/$repo/releases/latest" -o "$json"
     DOWNLOADED_VERSION="$(jq -er '.tag_name' "$json")"
+    valid_release_version "$DOWNLOADED_VERSION" || die "官方发布版本格式异常：$DOWNLOADED_VERSION"
     count="$(jq --arg re "$pattern" '[.assets[] | select(.name | test($re))] | length' "$json")"
     [[ "$count" == 1 ]] || die "官方发布中匹配到 $count 个文件：$pattern"
     url="$(jq -er --arg re "$pattern" '.assets[] | select(.name | test($re)) | .browser_download_url' "$json")"
+    asset_name="$(jq -er --arg re "$pattern" '.assets[] | select(.name | test($re)) | .name' "$json")"
     digest="$(jq -r --arg re "$pattern" '.assets[] | select(.name | test($re)) | (.digest // "")' "$json")"
+    if [[ "$digest" != sha256:* ]]; then
+        sidecar_url="$(jq -r --arg sha "${asset_name}.sha256" --arg dgst "${asset_name}.dgst" \
+            '[.assets[] | select(.name == $sha or .name == $dgst)] | sort_by(if .name == $sha then 0 else 1 end) | .[0].browser_download_url // ""' "$json")"
+    fi
     rm -f "$json"
     [[ "${RELEASE_CHECK_ONLY:-false}" == true ]] && return 0
     info "下载 $repo $DOWNLOADED_VERSION"
     download "$url" "$output"
     if [[ "$digest" == sha256:* ]]; then
-        [[ "$(sha256 "$output")" == "${digest#sha256:}" ]] || die "SHA-256 校验失败。"
+        expected="${digest#sha256:}"
+    elif [[ -n "$sidecar_url" ]]; then
+        new_temp_file sidecar
+        download "$sidecar_url" "$sidecar"
+        expected="$(parse_sha256_file "$sidecar")"
+        [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || die "无法解析官方 SHA-256 校验文件。"
+    fi
+    if [[ -n "$expected" ]]; then
+        [[ "$(sha256 "$output")" == "$expected" ]] || die "SHA-256 校验失败。"
         ok "SHA-256 校验通过。"
     else
         warn "上游未发布机器可读的 SHA-256；已使用 HTTPS 下载并将在安装前验证二进制。"
@@ -578,6 +608,15 @@ restart_services_or_rollback() {
         die "$failed 更新失败，已尝试回滚全部实例。"
     fi
     rm -f "${binary}.previous"
+}
+
+restart_service_checked() {
+    local service="$1"
+    if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
+        journalctl -u "$service" -n 30 --no-pager >&2 || true
+        die "$service 重启失败。"
+    fi
+    ok "$service 已重启并确认运行中。"
 }
 
 read_meta() {
@@ -817,7 +856,7 @@ restore_manager_state() {
     done
     for name in snell-server ssserver shadow-tls v2ray xray; do
         file="$LIB_DIR/$name"
-        rm -f "${file}.previous" "${file}.new"
+        rm -f "$file" "${file}.previous" "${file}.new"
         [[ ! -f "$snapshot/bin/$name" ]] || cp -a "$snapshot/bin/$name" "$file"
     done
     systemctl daemon-reload
@@ -832,7 +871,9 @@ restore_manager_state() {
         port="${rule%/*}"; proto="${rule##*/}"
         firewall_open "$port" "$proto"
     done <"$FIREWALL_DB"
-    sysctl -p /etc/sysctl.d/99-newworld-snell.conf >/dev/null 2>&1 || true
+    for file in /etc/sysctl.d/99-newworld-snell.conf /etc/sysctl.d/99-newworld-bbr.conf; do
+        [[ ! -f "$file" ]] || sysctl -p "$file" >/dev/null 2>&1 || true
+    done
     set -e
 }
 
@@ -1072,7 +1113,7 @@ configure_ss() {
     fi
     firewall_open "$port" tcp; firewall_open "$port" udp
     local ss_url
-    ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022-${instance}"
+    ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(uri_host "$(public_ip)"):${port}#NewWorld-SS2022-${instance}"
     print_config_block "SS-2022 客户端链接（实例 ${instance}）" "$ss_url"
     print_config_block "SS-2022 服务器配置（实例 ${instance}）" "$(cat "$config")"
 }
@@ -1095,7 +1136,10 @@ install_ss() {
     SS_VERSION="$DOWNLOADED_VERSION"
     if [[ -z "$instance" ]]; then
         updated=0
-        while read -r instance; do [[ -z "$instance" ]] || [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" != "$SS_VERSION" ]] && updated=$((updated + 1)); done < <(proxy_instance_dirs ss2022)
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
+            [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" == "$SS_VERSION" ]] || updated=$((updated + 1))
+        done < <(proxy_instance_dirs ss2022)
         ((updated > 0)) || { ok "SS-2022 已是最新版本：$SS_VERSION（无需更新）。"; return; }
         install_ss_binary
         while read -r current; do [[ -z "$current" ]] || services+=("$(ss_service "$current")"); done < <(proxy_instance_dirs ss2022)
@@ -1146,24 +1190,36 @@ install_stls_binary() {
 }
 
 set_backend_bind() {
-    local target="$1" instance="$2" bind="$3" port tmp protocol listen dir meta config service
+    local target="$1" instance="$2" bind="$3" port tmp protocol listen dir meta config service old_config old_meta
     case "$target" in
         snell)
             dir="$(snell_instance_dir "$instance")"; meta="$dir/meta"; config="$dir/snell.conf"; service="$(snell_service "$instance")"
             port="$(read_meta "$meta" PORT)"
             protocol="$(read_meta "$meta" PROTOCOL 2>/dev/null || printf 5)"
             if [[ "$bind" == dual ]]; then listen="0.0.0.0:${port},[::]:${port}"; else listen="${bind}:${port}"; fi
+            new_temp_file old_config; new_temp_file old_meta; cp -a "$config" "$old_config"; cp -a "$meta" "$old_meta"
             new_temp_file tmp; sed -E "s|^listen[[:space:]]*=.*|listen = ${listen}|" "$config" >"$tmp"
             install -m 0640 -o root -g "$SERVICE_USER" "$tmp" "$config"; rm -f "$tmp"
             write_meta "$meta" "VERSION=$(read_meta "$meta" VERSION)" "PROTOCOL=$protocol" "PORT=$port" "BIND=$bind"
-            systemctl restart "$service" ;;
+            if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
+                install -m 0640 -o root -g "$SERVICE_USER" "$old_config" "$config"
+                install -m 0640 -o root -g "$SERVICE_USER" "$old_meta" "$meta"
+                systemctl restart "$service" >/dev/null 2>&1 || true
+                die "$service 修改监听地址后启动失败，已恢复原配置。"
+            fi ;;
         ss2022)
             dir="$(ss_instance_dir "$instance")"; meta="$dir/meta"; config="$dir/config.json"; service="$(ss_service "$instance")"
             port="$(read_meta "$meta" PORT)"
+            new_temp_file old_config; new_temp_file old_meta; cp -a "$config" "$old_config"; cp -a "$meta" "$old_meta"
             new_temp_file tmp; jq --arg bind "$bind" '.server=$bind' "$config" >"$tmp"
             install -m 0640 -o root -g "$SERVICE_USER" "$tmp" "$config"; rm -f "$tmp"
             write_meta "$meta" "VERSION=$(read_meta "$meta" VERSION)" "PORT=$port" "BIND=$bind"
-            systemctl restart "$service" ;;
+            if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
+                install -m 0640 -o root -g "$SERVICE_USER" "$old_config" "$config"
+                install -m 0640 -o root -g "$SERVICE_USER" "$old_meta" "$meta"
+                systemctl restart "$service" >/dev/null 2>&1 || true
+                die "$service 修改监听地址后启动失败，已恢复原配置。"
+            fi ;;
     esac
 }
 
@@ -1249,7 +1305,8 @@ install_stls() {
         RELEASE_CHECK_ONLY=true download_github_release ihciah/shadow-tls "$(stls_asset_pattern)" /dev/null
         STLS_VERSION="$DOWNLOADED_VERSION"
         while read -r instance; do
-            [[ -z "$instance" ]] || [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" VERSION)" != "$STLS_VERSION" ]] && updated=$((updated + 1))
+            [[ -z "$instance" ]] && continue
+            [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" VERSION)" == "$STLS_VERSION" ]] || updated=$((updated + 1))
         done < <(shadowtls_instance_dirs)
         ((updated > 0)) || { ok "ShadowTLS 已是最新版本：$STLS_VERSION（无需更新）。"; return; }
         install_stls_binary
@@ -1953,7 +2010,7 @@ show_config() {
                     print_config_block "SS-2022 客户端配置（实例 ${instance}，经 ShadowTLS #${target}）" "$client_config"
                 done <<<"$wrappers"
             else
-                ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022-${instance}"
+                ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(uri_host "$(public_ip)"):${port}#NewWorld-SS2022-${instance}"
                 print_config_block "SS-2022 客户端链接（实例 ${instance}）" "$ss_url"
             fi
             print_config_block "SS-2022 服务器配置（实例 ${instance}）" "$(jq . "$config")" ;;
@@ -2099,8 +2156,43 @@ check_manager_update() {
     ok "已更新到 ${remote_version}；下次运行 nw-manager 时生效。"
 }
 
+verify_managed_instance() {
+    local kind="$1" instance="$2" instance_dir service config meta label
+    case "$kind" in
+        snell) instance_dir="$(snell_instance_dir "$instance")"; service="$(snell_service "$instance")"; config="$instance_dir/snell.conf"; label="Snell #$instance" ;;
+        ss2022) instance_dir="$(ss_instance_dir "$instance")"; service="$(ss_service "$instance")"; config="$instance_dir/config.json"; label="SS-2022 #$instance" ;;
+        shadowtls) instance_dir="$(shadowtls_instance_dir "$instance")"; service="$(shadowtls_service "$instance")"; config="$instance_dir/environment"; label="ShadowTLS #$instance" ;;
+        vmess) instance_dir="$(vmess_instance_dir "$instance")"; service="$(vmess_service "$instance")"; config="$instance_dir/config.json"; label="VMess #$instance" ;;
+        vless) instance_dir="$(vless_instance_dir "$instance")"; service="$(vless_service "$instance")"; config="$instance_dir/config.json"; label="VLESS #$instance" ;;
+        *) return 1 ;;
+    esac
+    meta="$instance_dir/meta"
+    [[ -r "$config" && -r "$meta" ]] || { warn "$label 配置或元数据不可读。"; return 1; }
+    systemctl cat "$service" >/dev/null 2>&1 || { warn "$label 缺少 systemd 服务。"; return 1; }
+    systemctl is-active --quiet "$service" || { warn "$label 服务未运行。"; return 1; }
+    case "$kind" in
+        snell)
+            grep -Eq '^listen[[:space:]]*=' "$config" && grep -Eq '^psk[[:space:]]*=' "$config" && grep -Eq '^version[[:space:]]*=[[:space:]]*[56]$' "$config" || \
+                { warn "$label 配置字段不完整。"; return 1; } ;;
+        ss2022)
+            have jq && jq -e '.server and (.server_port | type == "number") and .password and (.method | startswith("2022-"))' "$config" >/dev/null || \
+                { warn "$label JSON 配置无效。"; return 1; } ;;
+        shadowtls)
+            [[ -n "$(read_meta "$config" LISTEN_PORT 2>/dev/null || true)" && -n "$(read_meta "$config" BACKEND_PORT 2>/dev/null || true)" && \
+                -n "$(read_meta "$config" TLS_HOST 2>/dev/null || true)" && -n "$(read_meta "$config" PASSWORD 2>/dev/null || true)" ]] || \
+                { warn "$label 环境配置字段不完整。"; return 1; } ;;
+        vmess)
+            [[ -x "$V2RAY_BIN" ]] && "$V2RAY_BIN" test -config "$config" >/dev/null 2>&1 || \
+                { warn "$label 未通过 V2Fly 核心校验。"; return 1; } ;;
+        vless)
+            [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" run -test -config "$config" >/dev/null 2>&1 || \
+                { warn "$label 未通过 Xray 核心校验。"; return 1; } ;;
+    esac
+    printf '%s✓%s %-20s 配置及服务正常\n' "$GREEN" "$RESET" "$label"
+}
+
 doctor() {
-    local failures=0 command os_name memory_limit="" reported="" commands=(bash curl systemctl ip ss)
+    local failures=0 command os_name memory_limit="" reported="" instance commands=(bash curl systemctl ip ss)
     [[ ! -x "$SNELL_BIN" ]] || commands+=(unzip openssl)
     [[ ! -x "$SS_BIN" ]] || commands+=(jq tar xz sha256sum)
     [[ ! -x "$STLS_BIN" ]] || commands+=(jq openssl sha256sum)
@@ -2117,6 +2209,13 @@ doctor() {
         else printf '%s✗%s %-12s 缺失\n' "$RED" "$RESET" "$command"; failures=$((failures+1)); fi
     done
     [[ -d /run/systemd/system ]] || { warn "systemd 未运行。"; failures=$((failures+1)); }
+    if [[ -d /run/systemd/system ]]; then
+        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance snell "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs snell)
+        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance ss2022 "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs ss2022)
+        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance shadowtls "$instance" || failures=$((failures+1)); done < <(shadowtls_instance_dirs)
+        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance vmess "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs vmess)
+        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance vless "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs vless)
+    fi
     if { [[ -n "$(proxy_instance_dirs vmess)" ]] || [[ -n "$(proxy_instance_dirs vless)" ]]; } && have timedatectl; then
         [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] || warn "VMess/VLESS 依赖准确系统时间，当前未确认 NTP 已同步。"
     fi
@@ -2158,7 +2257,7 @@ menu() {
             1) install_component bbr;; 2) install_component snell;; 3) install_component ss2022;; 4) install_component shadowtls;;
             5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; esac; show_config "$component";;
             6) journalctl -u "$(select_component_service)" -n 100 --no-pager;;
-            7) systemctl restart "$(select_component_service)";;
+            7) restart_service_checked "$(select_component_service)";;
             8) component="$(select_component true)"; remove_component "$component";;
             9) doctor || true;; 10) install_manager;; 11) check_manager_update;; 12) install_component vmess;; 13) install_component vless;; 0) return 0;; *) warn "选择无效。";;
         esac
@@ -2190,7 +2289,7 @@ main() {
         restart)
             component="${1:-}"; shift || true; require_root; require_systemd
             service="$(component_service "$component" "${1:-}")" || die "未知组件。"
-            systemctl restart "$service";;
+            restart_service_checked "$service";;
         logs)
             component="${1:-}"; lines="${2:-100}"; require_systemd; [[ "$lines" =~ ^[1-9][0-9]*$ ]] || die "日志行数无效。"
             service="$(component_service "$component" "${3:-}")" || die "未知组件。"; journalctl -u "$service" -n "$lines" --no-pager;;

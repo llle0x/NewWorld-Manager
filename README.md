@@ -90,7 +90,8 @@ nw-manager remove shadowtls 1
 - 配置文件权限为 `0640`，仅 root 和专用服务用户 `newworld-proxy` 可读。
 - 普通 VPS 上服务使用低权限用户和 systemd 加固；受限容器中自动采用兼容模式。
 - 二进制原子替换，批量更新失败时整体回滚。
-- shadowsocks-rust 发布资产提供摘要时会校验 SHA-256；没有机器可读摘要时会明确警告并验证二进制可执行。
+- 优先使用 GitHub API 摘要或官方 `.sha256`/`.dgst` 文件校验 SHA-256；上游没有摘要时会明确警告并验证二进制可执行。
+- GitHub Actions 使用官方 Linux 二进制验证 SS-2022、ShadowTLS、VMess、VLESS REALITY 和 VLESS WS+TLS 配置。
 - 防火墙只删除脚本自己添加并记录的 UFW/firewalld 规则。
 - BBR 使用独立的 `/etc/sysctl.d/99-newworld-bbr.conf`，不修改 `/etc/sysctl.conf`。
 - 自更新先执行 Bash 语法检查，再原子替换全局脚本。

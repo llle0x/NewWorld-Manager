@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 5.2.0" ]]
+[[ "$inline_output" == "NewWorld-Manager 5.2.1" ]]
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.2.0" ]]
+[[ "$VERSION" == "5.2.1" ]]
 valid_instance_id 1
 valid_instance_id 99
 if valid_instance_id 0; then exit 1; fi
@@ -21,8 +21,17 @@ valid_uuid 123e4567-e89b-42d3-a456-426614174000
 if command -v openssl >/dev/null 2>&1; then valid_uuid "$(random_uuid)"; fi
 valid_ws_path /vmess-test_1
 if valid_ws_path 'missing-leading-slash'; then exit 1; fi
+valid_host example.com
+valid_host sub-domain.example.com
+if valid_host '-invalid.example.com'; then exit 1; fi
+if valid_host 'invalid..example.com'; then exit 1; fi
+valid_release_version v26.3.27
+valid_release_version 1.24.0
+if valid_release_version '../../payload'; then exit 1; fi
 [[ "$(vmess_asset_pattern)" == 'v2ray-linux-64\.zip$' ]]
 [[ "$(xray_asset_pattern)" == 'Xray-linux-64\.zip$' ]]
+(uname() { printf aarch64; }; [[ "$(ss_asset_pattern)" == 'aarch64-unknown-linux-musl\.tar\.xz$' ]] && [[ "$(stls_asset_pattern)" == 'shadow-tls-aarch64-unknown-linux-musl$' ]] && [[ "$(vmess_asset_pattern)" == 'v2ray-linux-arm64-v8a\.zip$' ]] && [[ "$(xray_asset_pattern)" == 'Xray-linux-arm64-v8a\.zip$' ]])
+(uname() { printf armv7l; }; [[ "$(ss_asset_pattern)" == 'armv7-unknown-linux-musleabihf\.tar\.xz$' ]] && [[ "$(stls_asset_pattern)" == 'shadow-tls-armv7-unknown-linux-musleabihf$' ]] && [[ "$(vmess_asset_pattern)" == 'v2ray-linux-arm32-v7a\.zip$' ]] && [[ "$(xray_asset_pattern)" == 'Xray-linux-arm32-v7a\.zip$' ]])
 valid_reality_target example.com:443
 if valid_reality_target example.com; then exit 1; fi
 proxy_instance_dirs() { :; }
@@ -43,6 +52,13 @@ unset -f proxy_instance_dirs
 [[ "$(select_component <<<4)" == vmess ]]
 [[ "$(select_component <<<5)" == vless ]]
 [[ "$(select_component true <<<6)" == bbr ]]
+
+checksum_file="$(mktemp /tmp/newworld-manager.checksum.XXXXXX)"
+printf 'SHA2-256= ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789\n' >"$checksum_file"
+[[ "$(parse_sha256_file "$checksum_file")" == abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 ]]
+printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  archive.zip\n' >"$checksum_file"
+[[ "$(parse_sha256_file "$checksum_file")" == 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ]]
+rm -f "$checksum_file"
 version_is_newer 3.3.1 3.3.0
 version_is_newer 4.0.0 3.9.9
 if version_is_newer 3.3.0 3.3.0; then exit 1; fi
@@ -62,6 +78,16 @@ reload_start smoke.service
 [[ " ${SYSTEMCTL_CALLS[*]} " == *" enable smoke.service "* ]]
 [[ " ${SYSTEMCTL_CALLS[*]} " == *" restart smoke.service "* ]]
 unset -f systemctl sleep
+
+systemctl() { [[ "$1" != restart ]] || return 0; [[ "$1" != is-active ]] || return 0; }
+journalctl() { :; }
+restart_service_checked smoke.service
+unset -f systemctl journalctl
+
+systemctl() { [[ "$1" != restart ]]; }
+journalctl() { :; }
+if (restart_service_checked broken.service); then exit 1; fi
+unset -f systemctl journalctl
 
 if command -v mktemp >/dev/null 2>&1 && command -v rm >/dev/null 2>&1; then
     # A failed batch restart must restore the previous shared binary.
