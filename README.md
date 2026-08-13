@@ -18,6 +18,7 @@
 - VMess 与 VLESS 的临时配置使用明确的 `.json` 文件名，确保 V2Fly/Xray 官方内核能够正确识别并校验。
 - GitHub API 限流或返回 403 时，会自动改用项目官方 Release 页面查找最新资产。
 - 安装完成和“查看配置”都会输出可用的 Surge `[Proxy]` 配置；VLESS 因 Surge 当前不支持而明确提示使用通用链接或 JSON。
+- SS-2022 与 ShadowTLS 在系统支持 IPv6 双栈时同时监听 IPv4/IPv6；不支持时自动回退 IPv4，ShadowTLS 后端始终限制在本机。
 - 旧版单实例配置会自动迁移为实例 `1`。
 
 ## 支持环境

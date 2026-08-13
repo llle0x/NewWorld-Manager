@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.3.0"
+readonly VERSION="5.3.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -248,6 +248,12 @@ uri_host() {
     if [[ "$1" == *:* && "$1" != \[*\] ]]; then printf '[%s]' "$1"; else printf '%s' "$1"; fi
 }
 
+public_bind() {
+    [[ -s /proc/net/if_inet6 && "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]] && printf :: || printf 0.0.0.0
+}
+
+socket_bind() { [[ "$1" == :: ]] && printf '[::]:%s' "$2" || printf '%s:%s' "$1" "$2"; }
+
 print_config_block() {
     local title="$1" content="$2"
     printf '\n========== %s ==========' "$title"
@@ -367,17 +373,19 @@ select_proxy_instance() {
 }
 
 shadowtls_migrate_legacy() {
-    local instance_dir
+    local instance_dir port
     [[ -f "$STLS_ROOT/environment" ]] || return 0
     [[ "$(id -u)" -eq 0 ]] || { warn "检测到旧版 ShadowTLS 配置，请使用 root 运行一次菜单完成迁移。"; return 0; }
     instance_dir="$(shadowtls_instance_dir 1)"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$STLS_ROOT/instances" "$instance_dir"
     mv "$STLS_ROOT/environment" "$STLS_ROOT/meta" "$instance_dir/"
+    port="$(read_meta "$instance_dir/environment" LISTEN_PORT)"
+    grep -q '^LISTEN_ADDR=' "$instance_dir/environment" || printf 'LISTEN_ADDR=%s\n' "$(socket_bind "$(public_bind)" "$port")" >>"$instance_dir/environment"
     grep -q '^TARGET_INSTANCE=' "$instance_dir/meta" || printf 'TARGET_INSTANCE=1\n' >>"$instance_dir/meta"
     systemctl disable --now "${STLS_SERVICE_PREFIX}.service" >/dev/null 2>&1 || true
     rm -f "$SYSTEMD_DIR/${STLS_SERVICE_PREFIX}.service"
     write_service "$(shadowtls_service 1)" "NewWorld ShadowTLS v3 Instance 1" \
-        "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$instance_dir/environment"
+        "$STLS_BIN --v3 server --listen \${LISTEN_ADDR} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$instance_dir/environment"
     reload_start "$(shadowtls_service 1)" || die "旧 ShadowTLS 配置迁移后的服务启动失败。"
     systemctl daemon-reload
     ok "已将原 ShadowTLS 配置迁移为实例 1。"
@@ -751,7 +759,7 @@ repair_service_unit() {
             instance="${service#newworld-ss2022-}"; kind=SS-2022; binary="$SS_BIN"; instance_dir="$(ss_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary -c $config" ;;
         newworld-shadowtls-*.service)
             instance="${service#newworld-shadowtls-}"; kind=ShadowTLS; binary="$STLS_BIN"; instance_dir="$(shadowtls_instance_dir "${instance%.service}")"; config="$instance_dir/environment"; env="$config"
-            command="$binary --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" ;;
+            command="$binary --v3 server --listen \${LISTEN_ADDR} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" ;;
         newworld-vmess-*.service)
             instance="${service#newworld-vmess-}"; kind=VMess; binary="$V2RAY_BIN"; instance_dir="$(vmess_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary run -config $config" ;;
         newworld-vless-*.service)
@@ -1175,7 +1183,7 @@ configure_ss() {
     port_unused "$port" || die "端口 $port 已被占用。"
     method="$(prompt_default '加密方式' '2022-blake3-aes-256-gcm')"
     case "$method" in 2022-blake3-aes-128-gcm) password="$(random_base64 16)";; 2022-blake3-aes-256-gcm) password="$(random_base64 32)";; *) die "仅允许标准 SS-2022 AES 方法。";; esac
-    bind="0.0.0.0"
+    bind="$(public_bind)"
     jq -n --arg server "$bind" --argjson port "$port" --arg password "$password" --arg method "$method" \
         '{server:$server,server_port:$port,password:$password,method:$method,mode:"tcp_and_udp"}' >"$config_tmp"
     install -m 0640 -o root -g "$SERVICE_USER" "$config_tmp" "$config"; rm -f "$config_tmp"
@@ -1194,12 +1202,24 @@ configure_ss() {
     print_config_block "SS-2022 服务器配置（实例 ${instance}）" "$(cat "$config")"
 }
 
+upgrade_ss_listener() {
+    local instance meta bind
+    bind="$(public_bind)"; [[ "$bind" == :: ]] || return 0
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; meta="$(ss_instance_dir "$instance")/meta"
+        [[ "$(read_meta "$meta" BIND)" == 0.0.0.0 ]] || continue
+        set_backend_bind ss2022 "$instance" "$bind"
+        ok "SS-2022 #$instance 已改为 IPv4/IPv6 双栈监听。"
+    done < <(proxy_instance_dirs ss2022)
+}
+
 install_ss() {
     local instance meta port bind updated=0 instances current
     local -a services=()
     migrate_proxy_legacy ss2022
     instances="$(proxy_instance_dirs ss2022)"
     repair_existing_service_units ss2022 "$SS_BIN"
+    upgrade_ss_listener
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 SS-2022 实例，无法执行更新。"
         instance=""
@@ -1305,7 +1325,7 @@ set_backend_bind() {
 }
 
 configure_stls() {
-    local instance="${1:-}" target backend_instance backend_dir listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
+    local instance="${1:-}" target backend_instance backend_dir listen_port listen_addr backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
     shadowtls_migrate_legacy
     [[ -n "$instance" ]] || { show_existing_instances shadowtls; read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"; }
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
@@ -1326,7 +1346,8 @@ configure_stls() {
     valid_host "$tls_host" || die "域名格式无效。"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$STLS_ROOT/instances" "$(shadowtls_instance_dir "$instance")"
     password="$(random_text 32)"; env="$(shadowtls_instance_dir "$instance")/environment"; meta="$(shadowtls_instance_dir "$instance")/meta"
-    write_meta "$env" "LISTEN_PORT=$listen_port" "BACKEND_PORT=$backend_port" "TLS_HOST=$tls_host" "PASSWORD=$password" "MONOIO_FORCE_LEGACY_DRIVER=1"
+    listen_addr="$(socket_bind "$(public_bind)" "$listen_port")"
+    write_meta "$env" "LISTEN_PORT=$listen_port" "LISTEN_ADDR=$listen_addr" "BACKEND_PORT=$backend_port" "TLS_HOST=$tls_host" "PASSWORD=$password" "MONOIO_FORCE_LEGACY_DRIVER=1"
     write_meta "$meta" "VERSION=${STLS_VERSION:-unknown}" "TARGET=$target" "TARGET_INSTANCE=$backend_instance" "PORT=$listen_port" "BACKEND_PORT=$backend_port" "PREVIOUS_BIND=$previous_bind"
     if ! shadowtls_backend_in_use "$target" "$backend_instance"; then first_for_backend=true; set_backend_bind "$target" "$backend_instance" "127.0.0.1"; firewall_close "$backend_port" tcp; fi
     if [[ "$first_for_backend" == true && "$target" == ss2022 ]]; then
@@ -1337,7 +1358,7 @@ configure_stls() {
     fi
     service="$(shadowtls_service "$instance")"
     write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" \
-        "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
+        "$STLS_BIN --v3 server --listen \${LISTEN_ADDR} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
     if ! reload_start "$service"; then
         systemctl disable --now "$service" >/dev/null 2>&1 || true
         rm -f "$SYSTEMD_DIR/$service"; rm -rf "$(shadowtls_instance_dir "$instance")"; systemctl daemon-reload
@@ -1355,12 +1376,28 @@ $(cat "$env")
     show_config "$target" "$backend_instance"
 }
 
+upgrade_stls_listener() {
+    local instance env port address service old_env old_unit
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; env="$(shadowtls_instance_dir "$instance")/environment"; port="$(read_meta "$env" LISTEN_PORT)"; address="$(socket_bind "$(public_bind)" "$port")"
+        [[ "$(read_meta "$env" LISTEN_ADDR 2>/dev/null || true)" == "$address" ]] && continue
+        new_temp_file old_env; cp -a "$env" "$old_env"; service="$(shadowtls_service "$instance")"; new_temp_file old_unit; cp -a "$SYSTEMD_DIR/$service" "$old_unit"
+        printf 'LISTEN_ADDR=%s\n' "$address" >>"$env"
+        write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" "$STLS_BIN --v3 server --listen \${LISTEN_ADDR} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
+        systemctl daemon-reload
+        if systemctl restart "$service" && systemctl is-active --quiet "$service"; then ok "ShadowTLS #$instance dual-stack listener: $address"; else
+            cp -a "$old_env" "$env"; cp -a "$old_unit" "$SYSTEMD_DIR/$service"; systemctl daemon-reload; systemctl restart "$service" || true; warn "ShadowTLS #$instance 无法使用 $address，已恢复原监听。"
+        fi
+    done < <(shadowtls_instance_dirs)
+}
+
 install_stls() {
     local instance meta port updated=0 instances current
     local -a services=()
     shadowtls_migrate_legacy
     instances="$(shadowtls_instance_dirs)"
     repair_existing_service_units shadowtls "$STLS_BIN"
+    upgrade_stls_listener
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 ShadowTLS 实例，无法执行更新。"
         instance=""

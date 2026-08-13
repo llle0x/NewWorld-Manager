@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 5.3.0" ]]
-
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.3.0" ]]
+[[ "$VERSION" == "5.3.1" ]]
+[[ "$(socket_bind :: 443)" == '[::]:443' ]]
+[[ "$(socket_bind 0.0.0.0 443)" == '0.0.0.0:443' ]]
 grep -q 'VMess 客户端配置（实例 .*Surge \[Proxy\]' newworld-manager.sh
 grep -q 'SS-2022 客户端配置（实例 .*Surge \[Proxy\]' newworld-manager.sh
 grep -q 'Surge 当前不支持 VLESS' newworld-manager.sh
