@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.2.1"
+readonly VERSION="5.2.2"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -593,6 +593,9 @@ restart_services_or_rollback() {
     local -a services=("$@")
     if ((${#services[@]} == 0)); then rm -f "${binary}.previous"; return 0; fi
     for service in "${services[@]}"; do
+        repair_service_unit "$service"
+    done
+    for service in "${services[@]}"; do
         if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
             failed="$service"
             break
@@ -612,6 +615,7 @@ restart_services_or_rollback() {
 
 restart_service_checked() {
     local service="$1"
+    repair_service_unit "$service"
     if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
         journalctl -u "$service" -n 30 --no-pager >&2 || true
         die "$service 重启失败。"
@@ -717,6 +721,65 @@ write_service() {
         printf '\n[Install]\nWantedBy=multi-user.target\n'
     } >"$unit_tmp"
     install -m 0644 -o root -g root "$unit_tmp" "$SYSTEMD_DIR/$name"; rm -f "$unit_tmp"
+}
+
+repair_service_unit() {
+    local service="$1" instance instance_dir config env
+    systemctl cat "$service" >/dev/null 2>&1 && return 0
+    case "$service" in
+        newworld-snell-*.service)
+            instance="${service#newworld-snell-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
+            instance_dir="$(snell_instance_dir "$instance")"; config="$instance_dir/snell.conf"
+            [[ -r "$config" && -r "$instance_dir/meta" && -x "$SNELL_BIN" ]] || die "Snell #$instance 配置残留不完整，无法自动恢复服务。"
+            write_service "$service" "NewWorld Snell Instance $instance" "$SNELL_BIN -c $config" ;;
+        newworld-ss2022-*.service)
+            instance="${service#newworld-ss2022-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
+            instance_dir="$(ss_instance_dir "$instance")"; config="$instance_dir/config.json"
+            [[ -r "$config" && -r "$instance_dir/meta" && -x "$SS_BIN" ]] || die "SS-2022 #$instance 配置残留不完整，无法自动恢复服务。"
+            write_service "$service" "NewWorld SS-2022 Instance $instance" "$SS_BIN -c $config" ;;
+        newworld-shadowtls-*.service)
+            instance="${service#newworld-shadowtls-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
+            instance_dir="$(shadowtls_instance_dir "$instance")"; env="$instance_dir/environment"
+            [[ -r "$env" && -r "$instance_dir/meta" && -x "$STLS_BIN" ]] || die "ShadowTLS #$instance 配置残留不完整，无法自动恢复服务。"
+            write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" \
+                "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env" ;;
+        newworld-vmess-*.service)
+            instance="${service#newworld-vmess-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
+            instance_dir="$(vmess_instance_dir "$instance")"; config="$instance_dir/config.json"
+            [[ -r "$config" && -r "$instance_dir/meta" && -x "$V2RAY_BIN" ]] || die "VMess #$instance 配置残留不完整，无法自动恢复服务。"
+            write_service "$service" "NewWorld VMess Instance $instance" "$V2RAY_BIN run -config $config" ;;
+        newworld-vless-*.service)
+            instance="${service#newworld-vless-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
+            instance_dir="$(vless_instance_dir "$instance")"; config="$instance_dir/config.json"
+            [[ -r "$config" && -r "$instance_dir/meta" && -x "$XRAY_BIN" ]] || die "VLESS #$instance 配置残留不完整，无法自动恢复服务。"
+            write_service "$service" "NewWorld VLESS Instance $instance" "$XRAY_BIN run -config $config" ;;
+        *) die "无法识别需要恢复的服务：$service" ;;
+    esac
+    systemctl daemon-reload
+    info "检测到 $service 的配置残留，已自动重建 systemd 服务。"
+}
+
+repair_existing_service_units() {
+    local kind="$1" binary="$2" instance service instances
+    [[ -x "$binary" ]] || return 0
+    case "$kind" in
+        shadowtls) instances="$(shadowtls_instance_dirs)" ;;
+        *) instances="$(proxy_instance_dirs "$kind")" ;;
+    esac
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        case "$kind" in
+            snell) service="$(snell_service "$instance")" ;;
+            ss|ss2022) service="$(ss_service "$instance")" ;;
+            shadowtls) service="$(shadowtls_service "$instance")" ;;
+            vmess) service="$(vmess_service "$instance")" ;;
+            vless) service="$(vless_service "$instance")" ;;
+        esac
+        systemctl cat "$service" >/dev/null 2>&1 && continue
+        repair_service_unit "$service"
+        systemctl enable "$service" >/dev/null
+        restart_service_checked "$service"
+    done <<<"$instances"
 }
 
 reload_start() {
@@ -999,6 +1062,7 @@ install_snell() {
     local -a services=()
     migrate_proxy_legacy snell
     instances="$(proxy_instance_dirs snell)"
+    repair_existing_service_units snell "$SNELL_BIN"
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 Snell 实例，无法执行更新。"
         instance=""
@@ -1127,6 +1191,7 @@ install_ss() {
     local -a services=()
     migrate_proxy_legacy ss2022
     instances="$(proxy_instance_dirs ss2022)"
+    repair_existing_service_units ss2022 "$SS_BIN"
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 SS-2022 实例，无法执行更新。"
         instance=""
@@ -1287,6 +1352,7 @@ install_stls() {
     local -a services=()
     shadowtls_migrate_legacy
     instances="$(shadowtls_instance_dirs)"
+    repair_existing_service_units shadowtls "$STLS_BIN"
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 ShadowTLS 实例，无法执行更新。"
         instance=""
@@ -1506,6 +1572,7 @@ install_vmess() {
     local instance meta port updated=0 instances current
     local -a services=()
     instances="$(proxy_instance_dirs vmess)"
+    repair_existing_service_units vmess "$V2RAY_BIN"
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 VMess 实例，无法执行更新。"
         instance=""
@@ -1738,6 +1805,7 @@ install_vless() {
     local instance meta port updated=0 instances current
     local -a services=()
     instances="$(proxy_instance_dirs vless)"
+    repair_existing_service_units vless "$XRAY_BIN"
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 VLESS 实例，无法执行更新。"; instance=""
     elif [[ -z "$instances" ]]; then
@@ -1912,7 +1980,7 @@ select_component_service() {
 
 service_state() {
     local service="$1"
-    if ! systemctl cat "$service" >/dev/null 2>&1; then printf '未安装'
+    if ! systemctl cat "$service" >/dev/null 2>&1; then printf '服务缺失'
     elif systemctl is-active --quiet "$service"; then printf '运行中'
     else printf '已停止'; fi
 }

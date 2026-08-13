@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 5.2.1" ]]
+[[ "$inline_output" == "NewWorld-Manager 5.2.2" ]]
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.2.1" ]]
+[[ "$VERSION" == "5.2.2" ]]
 valid_instance_id 1
 valid_instance_id 99
 if valid_instance_id 0; then exit 1; fi
@@ -89,6 +89,10 @@ systemctl() { [[ "$1" != restart ]] || return 0; [[ "$1" != is-active ]] || retu
 journalctl() { :; }
 restart_service_checked smoke.service
 unset -f systemctl journalctl
+
+systemctl() { [[ "$1" != cat ]]; }
+[[ "$(service_state missing.service)" == 服务缺失 ]]
+unset -f systemctl
 
 systemctl() { [[ "$1" != restart ]]; }
 journalctl() { :; }
