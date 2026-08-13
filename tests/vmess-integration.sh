@@ -23,7 +23,7 @@ certificate="$integration_dir/certificate.pem"
 private_key="$integration_dir/private.key"
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 -subj '/CN=example.com' \
     -addext 'subjectAltName=DNS:example.com' -keyout "$private_key" -out "$certificate" >/dev/null 2>&1
-validate_vmess_tls_material example.com "$certificate" "$private_key"
+validate_tls_material example.com "$certificate" "$private_key"
 
 tls_config="$integration_dir/ws-tls.json"
 write_vmess_server_config "$tls_config" ws-tls 20443 "$uuid" /vmess-test "$certificate" "$private_key"

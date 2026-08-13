@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # NewWorld-Manager
-# Independent Linux manager for BBR, Snell, Shadowsocks 2022, ShadowTLS and VMess.
+# Independent Linux manager for BBR, Snell, Shadowsocks 2022, ShadowTLS, VMess and VLESS.
 # It never downloads or executes third-party installation scripts.
 
 set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.1.1"
+readonly VERSION="5.2.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -19,6 +19,7 @@ readonly SNELL_BIN="$LIB_DIR/snell-server"
 readonly SS_BIN="$LIB_DIR/ssserver"
 readonly STLS_BIN="$LIB_DIR/shadow-tls"
 readonly V2RAY_BIN="$LIB_DIR/v2ray"
+readonly XRAY_BIN="$LIB_DIR/xray"
 readonly SNELL_SERVICE="newworld-snell.service"
 readonly SS_SERVICE="newworld-ss2022.service"
 readonly SNELL_ROOT="$ROOT_DIR/snell"
@@ -26,6 +27,7 @@ readonly SS_ROOT="$ROOT_DIR/ss2022"
 readonly STLS_SERVICE_PREFIX="newworld-shadowtls"
 readonly STLS_ROOT="$ROOT_DIR/shadowtls"
 readonly VMESS_ROOT="$ROOT_DIR/vmess"
+readonly VLESS_ROOT="$ROOT_DIR/vless"
 
 YES=false
 UPDATE_ONLY=false
@@ -154,23 +156,24 @@ select_snell_obfs() {
 
 select_component() {
     local include_bbr="${1:-false}" input
-    printf '组件：1) Snell  2) ss-2022  3) ShadowTLS  4) VMess' >&2
-    [[ "$include_bbr" != true ]] || printf '  5) BBR' >&2
+    printf '组件：1) Snell  2) ss-2022  3) ShadowTLS  4) VMess  5) VLESS' >&2
+    [[ "$include_bbr" != true ]] || printf '  6) BBR' >&2
     printf '\n' >&2
     if [[ "$include_bbr" == true ]]; then
-        read -r -p '请选择 [1-5]: ' input
+        read -r -p '请选择 [1-6]: ' input
     else
-        read -r -p '请选择 [1-4]: ' input
+        read -r -p '请选择 [1-5]: ' input
     fi
     case "$input" in
         1) printf snell ;;
         2) printf ss2022 ;;
         3) printf shadowtls ;;
         4) printf vmess ;;
-        5)
-            if [[ "$include_bbr" == true ]]; then printf bbr; else die "请选择 1-4。"; fi ;;
+        5) printf vless ;;
+        6)
+            if [[ "$include_bbr" == true ]]; then printf bbr; else die "请选择 1-5。"; fi ;;
         *)
-            if [[ "$include_bbr" == true ]]; then die "请选择 1-5。"; else die "请选择 1-4。"; fi ;;
+            if [[ "$include_bbr" == true ]]; then die "请选择 1-6。"; else die "请选择 1-5。"; fi ;;
     esac
 }
 
@@ -225,6 +228,12 @@ random_uuid() {
 
 base64url() { base64 | tr '+/' '-_' | tr -d '=\n'; }
 
+uri_encode() { jq -rn --arg value "$1" '$value | @uri'; }
+
+uri_host() {
+    if [[ "$1" == *:* && "$1" != \[*\] ]]; then printf '[%s]' "$1"; else printf '%s' "$1"; fi
+}
+
 print_config_block() {
     local title="$1" content="$2"
     printf '\n========== %s ==========' "$title"
@@ -257,9 +266,11 @@ valid_instance_id() { [[ "$1" =~ ^[1-9][0-9]?$ ]]; }
 snell_service() { printf 'newworld-snell-%s.service' "$1"; }
 ss_service() { printf 'newworld-ss2022-%s.service' "$1"; }
 vmess_service() { printf 'newworld-vmess-%s.service' "$1"; }
+vless_service() { printf 'newworld-vless-%s.service' "$1"; }
 snell_instance_dir() { printf '%s/instances/%s' "$SNELL_ROOT" "$1"; }
 ss_instance_dir() { printf '%s/instances/%s' "$SS_ROOT" "$1"; }
 vmess_instance_dir() { printf '%s/instances/%s' "$VMESS_ROOT" "$1"; }
+vless_instance_dir() { printf '%s/instances/%s' "$VLESS_ROOT" "$1"; }
 
 migrate_proxy_legacy() {
     local kind="$1" root instance_dir old_config old_meta service new_service
@@ -288,6 +299,7 @@ proxy_instance_dirs() {
         snell) migrate_proxy_legacy snell; root="$SNELL_ROOT" ;;
         ss|ss2022) migrate_proxy_legacy ss2022; root="$SS_ROOT" ;;
         vmess) root="$VMESS_ROOT" ;;
+        vless) root="$VLESS_ROOT" ;;
         *) die "未知实例类型：$kind" ;;
     esac
     find "$root/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -n || true
@@ -430,6 +442,7 @@ ensure_dependencies() {
         ss|ss2022) commands=(base64 curl jq tar xz openssl sha256sum ip ss) ;;
         shadowtls) commands=(curl jq openssl sha256sum ip ss) ;;
         vmess) commands=(base64 curl jq unzip openssl sha256sum ip ss) ;;
+        vless) commands=(base64 curl jq unzip openssl sha256sum ip ss) ;;
         self-install) commands=(curl) ;;
         *) die "未知的依赖配置：$profile" ;;
     esac
@@ -485,7 +498,7 @@ ensure_service_user() {
 
 make_layout() {
     install -d -m 0750 -o root -g "$SERVICE_USER" \
-        "$ROOT_DIR" "$LIB_DIR" "$ROOT_DIR/snell" "$ROOT_DIR/ss2022" "$ROOT_DIR/shadowtls" "$ROOT_DIR/vmess"
+        "$ROOT_DIR" "$LIB_DIR" "$ROOT_DIR/snell" "$ROOT_DIR/ss2022" "$ROOT_DIR/shadowtls" "$ROOT_DIR/vmess" "$ROOT_DIR/vless"
     touch "$FIREWALL_DB"
     chmod 0600 "$FIREWALL_DB"
 }
@@ -620,6 +633,20 @@ sync_vmess_meta_versions() {
     done < <(proxy_instance_dirs vmess)
 }
 
+sync_vless_meta_versions() {
+    local instance meta
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        meta="$(vless_instance_dir "$instance")/meta"
+        write_meta "$meta" "VERSION=$VLESS_VERSION" "PORT=$(read_meta "$meta" PORT)" \
+            "TRANSPORT=$(read_meta "$meta" TRANSPORT)" "DOMAIN=$(read_meta "$meta" DOMAIN 2>/dev/null || true)" \
+            "PATH=$(read_meta "$meta" PATH 2>/dev/null || true)" "CERT_SOURCE=$(read_meta "$meta" CERT_SOURCE 2>/dev/null || true)" \
+            "KEY_SOURCE=$(read_meta "$meta" KEY_SOURCE 2>/dev/null || true)" "REALITY_TARGET=$(read_meta "$meta" REALITY_TARGET 2>/dev/null || true)" \
+            "SERVER_NAME=$(read_meta "$meta" SERVER_NAME 2>/dev/null || true)" "REALITY_PASSWORD=$(read_meta "$meta" REALITY_PASSWORD 2>/dev/null || true)" \
+            "SHORT_ID=$(read_meta "$meta" SHORT_ID 2>/dev/null || true)"
+    done < <(proxy_instance_dirs vless)
+}
+
 service_user_group() { id -gn "$SERVICE_USER"; }
 
 is_container() {
@@ -747,7 +774,7 @@ snapshot_manager_state() {
     cp -a "$ROOT_DIR/." "$state_dir/root/"
     : >"$state_dir/active"
     shopt -s nullglob
-    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service)
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service "$SYSTEMD_DIR"/newworld-vless*.service)
     shopt -u nullglob
     for file in "${service_files[@]}"; do
         service="${file##*/}"
@@ -759,7 +786,7 @@ snapshot_manager_state() {
     for file in /etc/sysctl.d/99-newworld-snell.conf /etc/sysctl.d/99-newworld-bbr.conf; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/sysctl/${file##*/}"
     done
-    for file in "$SNELL_BIN" "$SS_BIN" "$STLS_BIN" "$V2RAY_BIN"; do
+    for file in "$SNELL_BIN" "$SS_BIN" "$STLS_BIN" "$V2RAY_BIN" "$XRAY_BIN"; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/bin/${file##*/}"
     done
     printf -v "$variable" '%s' "$state_dir"
@@ -776,10 +803,10 @@ restore_manager_state() {
         [[ -n "$rule" && -n "$tool" ]] || continue
         firewall_close "${rule%/*}" "${rule##*/}"
     done <"$current_rules"
-    for name in snell ss2022 shadowtls vmess firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
+    for name in snell ss2022 shadowtls vmess vless firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
     cp -a "$snapshot/root/." "$ROOT_DIR/"
     shopt -s nullglob
-    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service)
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service "$SYSTEMD_DIR"/newworld-vless*.service)
     for file in "${service_files[@]}"; do systemctl stop "${file##*/}" >/dev/null 2>&1 || true; rm -f "$file"; done
     service_files=("$snapshot/services"/*.service)
     for file in "${service_files[@]}"; do cp -a "$file" "$SYSTEMD_DIR/${file##*/}"; done
@@ -788,7 +815,7 @@ restore_manager_state() {
         file="/etc/sysctl.d/$name"
         if [[ -f "$snapshot/sysctl/$name" ]]; then cp -a "$snapshot/sysctl/$name" "$file"; else rm -f "$file"; fi
     done
-    for name in snell-server ssserver shadow-tls v2ray; do
+    for name in snell-server ssserver shadow-tls v2ray xray; do
         file="$LIB_DIR/$name"
         rm -f "${file}.previous" "${file}.new"
         [[ ! -f "$snapshot/bin/$name" ]] || cp -a "$snapshot/bin/$name" "$file"
@@ -1278,7 +1305,7 @@ select_vmess_transport() {
     esac
 }
 
-validate_vmess_tls_material() {
+validate_tls_material() {
     local domain="$1" certificate="$2" private_key="$3" cert_public key_public
     [[ -r "$certificate" ]] || die "无法读取 TLS 证书：$certificate"
     [[ -r "$private_key" ]] || die "无法读取 TLS 私钥：$private_key"
@@ -1295,7 +1322,7 @@ validate_vmess_tls_material() {
     fi
 }
 
-install_vmess_tls_material() {
+install_tls_material() {
     local instance_dir="$1" certificate="$2" private_key="$3"
     install -m 0640 -o root -g "$SERVICE_USER" -- "$certificate" "$instance_dir/certificate.pem.new"
     install -m 0640 -o root -g "$SERVICE_USER" -- "$private_key" "$instance_dir/private.key.new"
@@ -1328,7 +1355,7 @@ refresh_vmess_tls_materials() {
         if cmp -s "$certificate" "$instance_dir/certificate.pem" && cmp -s "$private_key" "$instance_dir/private.key"; then
             continue
         fi
-        if ! (validate_vmess_tls_material "$domain" "$certificate" "$private_key"); then
+        if ! (validate_tls_material "$domain" "$certificate" "$private_key"); then
             warn "VMess #$instance 的新证书校验失败，保留当前证书。"
             continue
         fi
@@ -1338,7 +1365,7 @@ refresh_vmess_tls_materials() {
         fi
         cp -a "$instance_dir/certificate.pem" "$instance_dir/certificate.pem.previous"
         cp -a "$instance_dir/private.key" "$instance_dir/private.key.previous"
-        install_vmess_tls_material "$instance_dir" "$certificate" "$private_key"
+        install_tls_material "$instance_dir" "$certificate" "$private_key"
         if ! systemctl restart "$(vmess_service "$instance")" || ! systemctl is-active --quiet "$(vmess_service "$instance")"; then
             mv -f "$instance_dir/certificate.pem.previous" "$instance_dir/certificate.pem"
             mv -f "$instance_dir/private.key.previous" "$instance_dir/private.key"
@@ -1374,13 +1401,13 @@ configure_vmess() {
         certificate="$(prompt_default 'TLS 证书路径' "/etc/letsencrypt/live/$domain/fullchain.pem")"
         private_key="$(prompt_default 'TLS 私钥路径' "/etc/letsencrypt/live/$domain/privkey.pem")"
         [[ "$certificate" == /* && "$private_key" == /* ]] || die "TLS 证书和私钥必须使用绝对路径。"
-        validate_vmess_tls_material "$domain" "$certificate" "$private_key"
+        validate_tls_material "$domain" "$certificate" "$private_key"
     fi
     instance_dir="$(vmess_instance_dir "$instance")"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$VMESS_ROOT/instances" "$instance_dir"
     config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_file config_tmp
     if [[ "$transport" == ws-tls ]]; then
-        install_vmess_tls_material "$instance_dir" "$certificate" "$private_key"
+        install_tls_material "$instance_dir" "$certificate" "$private_key"
         write_vmess_server_config "$config_tmp" "$transport" "$port" "$uuid" "$ws_path" "$instance_dir/certificate.pem" "$instance_dir/private.key"
     else
         write_vmess_server_config "$config_tmp" "$transport" "$port" "$uuid"
@@ -1428,7 +1455,8 @@ install_vmess() {
             while read -r current; do [[ -z "$current" ]] || updated=$((updated + 1)); done < <(proxy_instance_dirs vmess)
         else
             while read -r current; do
-                [[ -z "$current" ]] || [[ "$(read_meta "$(vmess_instance_dir "$current")/meta" VERSION)" != "$VMESS_VERSION" ]] && updated=$((updated + 1))
+                [[ -z "$current" ]] && continue
+                [[ "$(read_meta "$(vmess_instance_dir "$current")/meta" VERSION)" == "$VMESS_VERSION" ]] || updated=$((updated + 1))
             done < <(proxy_instance_dirs vmess)
         fi
         if ((updated == 0)); then
@@ -1463,6 +1491,225 @@ install_vmess() {
     configure_vmess "$instance"
 }
 
+xray_asset_pattern() {
+    case "$(architecture)" in
+        x86_64) printf 'Xray-linux-64\\.zip$' ;;
+        aarch64) printf 'Xray-linux-arm64-v8a\\.zip$' ;;
+        armv7) printf 'Xray-linux-arm32-v7a\\.zip$' ;;
+        arm) printf 'Xray-linux-arm32-v6\\.zip$' ;;
+    esac
+}
+
+install_xray_binary() {
+    local tmpdir archive candidate
+    new_temp_dir tmpdir
+    archive="$tmpdir/xray.zip"
+    download_github_release XTLS/Xray-core "$(xray_asset_pattern)" "$archive"
+    unzip -q "$archive" -d "$tmpdir"
+    candidate="$(find "$tmpdir" -type f -name xray -print -quit)"
+    [[ -n "$candidate" ]] || die "Xray 官方压缩包中缺少 xray。"
+    chmod +x "$candidate"
+    "$candidate" version >/dev/null || die "Xray 官方二进制无法在当前系统执行。"
+    atomic_binary_install "$candidate" "$XRAY_BIN"
+    VLESS_VERSION="$DOWNLOADED_VERSION"
+    rm -rf "$tmpdir"
+}
+
+select_vless_transport() {
+    local input
+    printf 'VLESS 传输：1) REALITY + Vision（推荐，无需域名证书）  2) WebSocket + TLS（需要域名和证书）\n' >&2
+    read -r -p '请选择 [1-2，默认 1]: ' input
+    case "$input" in
+        ""|1|reality) printf reality ;;
+        2|ws-tls) printf ws-tls ;;
+        *) die "VLESS 传输请选择 1 或 2。" ;;
+    esac
+}
+
+valid_reality_target() {
+    local target="$1" host port
+    [[ "$target" == *:* ]] || return 1
+    host="${target%:*}"; port="${target##*:}"
+    valid_host "$host" && valid_port "$port"
+}
+
+parse_reality_keys() {
+    local output="$1"
+    REALITY_PRIVATE_KEY="$(awk -F': *' 'tolower($1) ~ /^private/ {print $2; exit}' <<<"$output")"
+    REALITY_PASSWORD="$(awk -F': *' 'tolower($1) ~ /^(password|public)/ {print $2; exit}' <<<"$output")"
+    [[ "$REALITY_PRIVATE_KEY" =~ ^[A-Za-z0-9_-]+$ && "$REALITY_PASSWORD" =~ ^[A-Za-z0-9_-]+$ ]] || \
+        die "无法解析 Xray REALITY 密钥输出。"
+}
+
+generate_reality_keys() {
+    local output
+    output="$("$XRAY_BIN" x25519)" || die "Xray 无法生成 REALITY 密钥。"
+    parse_reality_keys "$output"
+}
+
+write_vless_server_config() {
+    local output="$1" transport="$2" port="$3" uuid="$4" option1="${5:-}" option2="${6:-}" option3="${7:-}" option4="${8:-}"
+    case "$transport" in
+        reality)
+            jq -n --argjson port "$port" --arg uuid "$uuid" --arg target "$option1" --arg server_name "$option2" \
+                --arg private_key "$option3" --arg short_id "$option4" \
+                '{log:{loglevel:"warning"},inbounds:[{listen:"0.0.0.0",port:$port,protocol:"vless",tag:"vless-in",settings:{clients:[{id:$uuid,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"tcp",security:"reality",realitySettings:{show:false,target:$target,xver:0,serverNames:[$server_name],privateKey:$private_key,shortIds:[$short_id]}}}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"}]}' >"$output" ;;
+        ws-tls)
+            jq -n --argjson port "$port" --arg uuid "$uuid" --arg path "$option1" --arg cert "$option2" --arg key "$option3" \
+                '{log:{loglevel:"warning"},inbounds:[{listen:"0.0.0.0",port:$port,protocol:"vless",tag:"vless-in",settings:{clients:[{id:$uuid}],decryption:"none"},streamSettings:{network:"ws",security:"tls",tlsSettings:{minVersion:"1.2",alpn:["http/1.1"],certificates:[{certificateFile:$cert,keyFile:$key}]},wsSettings:{path:$path}}}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"}]}' >"$output" ;;
+        *) die "未知 VLESS 传输：$transport" ;;
+    esac
+}
+
+write_vless_client_config() {
+    local output="$1" transport="$2" address="$3" port="$4" uuid="$5" option1="${6:-}" option2="${7:-}" option3="${8:-}"
+    case "$transport" in
+        reality)
+            jq -n --arg address "$address" --argjson port "$port" --arg uuid "$uuid" --arg server_name "$option1" \
+                --arg password "$option2" --arg short_id "$option3" \
+                '{log:{loglevel:"warning"},inbounds:[{listen:"127.0.0.1",port:10808,protocol:"socks",settings:{udp:true}}],outbounds:[{protocol:"vless",tag:"proxy",settings:{vnext:[{address:$address,port:$port,users:[{id:$uuid,encryption:"none",flow:"xtls-rprx-vision"}]}]},streamSettings:{network:"tcp",security:"reality",realitySettings:{serverName:$server_name,fingerprint:"chrome",password:$password,shortId:$short_id,spiderX:"/"}}},{protocol:"freedom",tag:"direct"}]}' >"$output" ;;
+        ws-tls)
+            jq -n --arg address "$address" --argjson port "$port" --arg uuid "$uuid" --arg domain "$option1" --arg path "$option2" \
+                '{log:{loglevel:"warning"},inbounds:[{listen:"127.0.0.1",port:10808,protocol:"socks",settings:{udp:true}}],outbounds:[{protocol:"vless",tag:"proxy",settings:{vnext:[{address:$address,port:$port,users:[{id:$uuid,encryption:"none"}]}]},streamSettings:{network:"ws",security:"tls",tlsSettings:{serverName:$domain,fingerprint:"chrome",alpn:["http/1.1"]},wsSettings:{path:$path,headers:{Host:$domain}}}},{protocol:"freedom",tag:"direct"}]}' >"$output" ;;
+        *) die "未知 VLESS 传输：$transport" ;;
+    esac
+}
+
+refresh_vless_tls_materials() {
+    local instance instance_dir meta domain certificate private_key updated=0 service
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        instance_dir="$(vless_instance_dir "$instance")"; meta="$instance_dir/meta"
+        [[ "$(read_meta "$meta" TRANSPORT 2>/dev/null || true)" == ws-tls ]] || continue
+        domain="$(read_meta "$meta" DOMAIN)"; certificate="$(read_meta "$meta" CERT_SOURCE)"; private_key="$(read_meta "$meta" KEY_SOURCE)"
+        if [[ ! -r "$certificate" || ! -r "$private_key" ]]; then
+            warn "VLESS #$instance 的证书源文件不可读，保留当前证书。"; continue
+        fi
+        if cmp -s "$certificate" "$instance_dir/certificate.pem" && cmp -s "$private_key" "$instance_dir/private.key"; then continue; fi
+        if ! (validate_tls_material "$domain" "$certificate" "$private_key"); then
+            warn "VLESS #$instance 的新证书校验失败，保留当前证书。"; continue
+        fi
+        if [[ ! -f "$instance_dir/certificate.pem" || ! -f "$instance_dir/private.key" ]]; then
+            warn "VLESS #$instance 的托管证书不完整，请重新配置该实例。"; continue
+        fi
+        cp -a "$instance_dir/certificate.pem" "$instance_dir/certificate.pem.previous"
+        cp -a "$instance_dir/private.key" "$instance_dir/private.key.previous"
+        install_tls_material "$instance_dir" "$certificate" "$private_key"
+        service="$(vless_service "$instance")"
+        if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
+            mv -f "$instance_dir/certificate.pem.previous" "$instance_dir/certificate.pem"
+            mv -f "$instance_dir/private.key.previous" "$instance_dir/private.key"
+            systemctl restart "$service" >/dev/null 2>&1 || true
+            warn "VLESS #$instance 新证书启动失败，已恢复原证书。"; continue
+        fi
+        rm -f "$instance_dir/certificate.pem.previous" "$instance_dir/private.key.previous"
+        updated=$((updated + 1)); ok "VLESS #$instance 的 TLS 证书已同步并重启。"
+    done < <(proxy_instance_dirs vless)
+    VLESS_CERT_UPDATES="$updated"
+}
+
+configure_vless() {
+    local instance="${1:-}" transport port uuid domain="" ws_path="" certificate="" private_key="" reality_target="" server_name="" short_id="" instance_dir config meta config_tmp service
+    [[ -n "$instance" ]] || { show_existing_instances vless; read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+    [[ ! -d "$(vless_instance_dir "$instance")" ]] || die "VLESS 实例 $instance 已存在。"
+    transport="$(select_vless_transport)"
+    port="$(prompt_default '监听端口' '443')"; valid_port "$port" || die "端口无效。"
+    port_unused "$port" || die "端口 $port 已被占用。"
+    read -r -p 'UUID（留空自动生成）: ' uuid; uuid="${uuid:-$(random_uuid)}"
+    valid_uuid "$uuid" || die "UUID 格式无效。"
+    if [[ "$transport" == reality ]]; then
+        warn "REALITY 建议使用与本机网络位置接近、支持 TLS 1.3 的非 CDN 目标；不恰当的目标可能导致回落转发被滥用。"
+        reality_target="$(prompt_default 'REALITY 伪装目标（域名:端口）' 'www.microsoft.com:443')"
+        valid_reality_target "$reality_target" || die "REALITY 目标必须为有效的 域名:端口。"
+        server_name="$(prompt_default 'REALITY Server Name' "${reality_target%:*}")"; valid_host "$server_name" || die "Server Name 格式无效。"
+        [[ "$server_name" == "${reality_target%:*}" ]] || warn "Server Name 必须是伪装目标证书的有效 SAN，否则客户端无法连接。"
+        generate_reality_keys
+        short_id="$(openssl rand -hex 8)"
+    else
+        domain="$(prompt_default 'TLS 域名' 'example.com')"; valid_host "$domain" || die "域名格式无效。"
+        ws_path="$(prompt_default 'WebSocket 路径' "/$(random_text 12)")"; valid_ws_path "$ws_path" || die "WebSocket 路径必须以 / 开头且不能包含空格。"
+        certificate="$(prompt_default 'TLS 证书路径' "/etc/letsencrypt/live/$domain/fullchain.pem")"
+        private_key="$(prompt_default 'TLS 私钥路径' "/etc/letsencrypt/live/$domain/privkey.pem")"
+        [[ "$certificate" == /* && "$private_key" == /* ]] || die "TLS 证书和私钥必须使用绝对路径。"
+        validate_tls_material "$domain" "$certificate" "$private_key"
+    fi
+    instance_dir="$(vless_instance_dir "$instance")"
+    install -d -m 0750 -o root -g "$SERVICE_USER" "$VLESS_ROOT/instances" "$instance_dir"
+    config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_file config_tmp
+    if [[ "$transport" == reality ]]; then
+        write_vless_server_config "$config_tmp" reality "$port" "$uuid" "$reality_target" "$server_name" "$REALITY_PRIVATE_KEY" "$short_id"
+    else
+        install_tls_material "$instance_dir" "$certificate" "$private_key"
+        write_vless_server_config "$config_tmp" ws-tls "$port" "$uuid" "$ws_path" "$instance_dir/certificate.pem" "$instance_dir/private.key"
+    fi
+    if ! "$XRAY_BIN" run -test -config "$config_tmp" >/dev/null; then
+        rm -rf "$instance_dir"; die "VLESS 配置未通过 Xray 官方内核校验。"
+    fi
+    install -m 0640 -o root -g "$SERVICE_USER" "$config_tmp" "$config"; rm -f "$config_tmp"
+    write_meta "$meta" "VERSION=${VLESS_VERSION:-unknown}" "PORT=$port" "TRANSPORT=$transport" "DOMAIN=$domain" "PATH=$ws_path" \
+        "CERT_SOURCE=$certificate" "KEY_SOURCE=$private_key" "REALITY_TARGET=$reality_target" "SERVER_NAME=$server_name" \
+        "REALITY_PASSWORD=${REALITY_PASSWORD:-}" "SHORT_ID=$short_id"
+    service="$(vless_service "$instance")"
+    write_service "$service" "NewWorld VLESS Instance $instance" "$XRAY_BIN run -config $config"
+    if ! reload_start "$service"; then
+        systemctl disable --now "$service" >/dev/null 2>&1 || true
+        rm -f "$SYSTEMD_DIR/$service"; rm -rf "$instance_dir"; systemctl daemon-reload
+        die "VLESS 实例 $instance 启动失败，已清理未完成安装。"
+    fi
+    firewall_open "$port" tcp; show_config vless "$instance"
+    [[ "$transport" != ws-tls ]] || warn "证书续期后运行 nw-manager update vless，脚本会同步新证书。"
+}
+
+install_vless() {
+    local instance meta port updated=0 instances current
+    local -a services=()
+    instances="$(proxy_instance_dirs vless)"
+    if [[ "$UPDATE_ONLY" == true ]]; then
+        [[ -n "$instances" ]] || die "尚未安装 VLESS 实例，无法执行更新。"; instance=""
+    elif [[ -z "$instances" ]]; then
+        read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"
+    else
+        show_existing_instances vless
+        read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
+    fi
+    RELEASE_CHECK_ONLY=true download_github_release XTLS/Xray-core "$(xray_asset_pattern)" /dev/null
+    VLESS_VERSION="$DOWNLOADED_VERSION"; VLESS_CERT_UPDATES=0
+    [[ -z "$instances" ]] || refresh_vless_tls_materials
+    if [[ -z "$instance" ]]; then
+        if [[ ! -x "$XRAY_BIN" ]]; then
+            while read -r current; do [[ -z "$current" ]] || updated=$((updated + 1)); done < <(proxy_instance_dirs vless)
+        else
+            while read -r current; do
+                [[ -z "$current" ]] && continue
+                [[ "$(read_meta "$(vless_instance_dir "$current")/meta" VERSION)" == "$VLESS_VERSION" ]] || updated=$((updated + 1))
+            done < <(proxy_instance_dirs vless)
+        fi
+        if ((updated == 0)); then
+            if ((VLESS_CERT_UPDATES > 0)); then ok "Xray 核心已是最新版本：$VLESS_VERSION；已同步 ${VLESS_CERT_UPDATES} 个 TLS 证书。"
+            else ok "Xray 核心已是最新版本：$VLESS_VERSION（无需更新）。"; fi
+            return
+        fi
+        install_xray_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(vless_service "$current")"); done < <(proxy_instance_dirs vless)
+        restart_services_or_rollback "$XRAY_BIN" "${services[@]}"; sync_vless_meta_versions
+        while read -r current; do
+            [[ -z "$current" ]] && continue; meta="$(vless_instance_dir "$current")/meta"; port="$(read_meta "$meta" PORT)"; firewall_open "$port" tcp
+        done < <(proxy_instance_dirs vless)
+        ok "已更新全部 ${updated} 个 VLESS 实例到 ${VLESS_VERSION}。"; return
+    fi
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+    [[ ! -d "$(vless_instance_dir "$instance")" ]] || die "VLESS 实例 $instance 已存在；直接回车可更新全部实例。"
+    if [[ -x "$XRAY_BIN" && -n "$instances" ]] && [[ "$(read_meta "$(vless_instance_dir "${instances%%$'\n'*}")/meta" VERSION)" == "$VLESS_VERSION" ]]; then
+        info "Xray 核心已是最新版：${VLESS_VERSION}，直接创建新实例。"
+    else
+        install_xray_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(vless_service "$current")"); done < <(proxy_instance_dirs vless)
+        restart_services_or_rollback "$XRAY_BIN" "${services[@]}"; sync_vless_meta_versions
+    fi
+    configure_vless "$instance"
+}
+
 enable_bbr() {
     local available config="/etc/sysctl.d/99-newworld-bbr.conf"
     modprobe tcp_bbr 2>/dev/null || true
@@ -1495,6 +1742,7 @@ remove_component() {
         ss|ss2022) migrate_proxy_legacy ss2022; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; label="SS-2022 #$instance" ;;
         shadowtls) shadowtls_migrate_legacy; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; label="ShadowTLS #$instance" ;;
         vmess) instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance vmess)"; label="VMess #$instance" ;;
+        vless) instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance vless)"; label="VLESS #$instance" ;;
         bbr) label=BBR ;;
         *) die "未知组件：$component" ;;
     esac
@@ -1534,6 +1782,12 @@ remove_component() {
             systemctl disable --now "$(vmess_service "$instance")" >/dev/null 2>&1 || true
             firewall_close "$port" tcp; rm -f "$SYSTEMD_DIR/$(vmess_service "$instance")"; rm -rf "$instance_dir"
             [[ -n "$(proxy_instance_dirs vmess)" ]] || { rm -f "$V2RAY_BIN" "${V2RAY_BIN}.previous"; rm -rf "$VMESS_ROOT"; } ;;
+        vless)
+            instance_dir="$(vless_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
+            port="$(read_meta "$instance_dir/meta" PORT)"
+            systemctl disable --now "$(vless_service "$instance")" >/dev/null 2>&1 || true
+            firewall_close "$port" tcp; rm -f "$SYSTEMD_DIR/$(vless_service "$instance")"; rm -rf "$instance_dir"
+            [[ -n "$(proxy_instance_dirs vless)" ]] || { rm -f "$XRAY_BIN" "${XRAY_BIN}.previous"; rm -rf "$VLESS_ROOT"; } ;;
         bbr) disable_bbr; return 0 ;;
     esac
     systemctl daemon-reload; systemctl reset-failed >/dev/null 2>&1 || true
@@ -1567,6 +1821,12 @@ component_service() {
                 die "VMess 实例 $instance 不存在。"
             fi
             vmess_service "$instance" ;;
+        vless)
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance vless)"
+            if ! valid_instance_id "$instance" || [[ ! -d "$(vless_instance_dir "$instance")" ]]; then
+                die "VLESS 实例 $instance 不存在。"
+            fi
+            vless_service "$instance" ;;
         *) return 1 ;;
     esac
 }
@@ -1607,6 +1867,10 @@ show_status() {
         [[ -z "$instance" ]] && continue; instance_dir="$(vmess_instance_dir "$instance")"
         printf '%-16s %-12s %-14s\n' "VMess #$instance" "$(service_state "$(vmess_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
     done < <(proxy_instance_dirs vmess)
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; instance_dir="$(vless_instance_dir "$instance")"
+        printf '%-16s %-12s %-14s\n' "VLESS #$instance" "$(service_state "$(vless_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
+    done < <(proxy_instance_dirs vless)
     algo="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
     qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
     printf 'BBR：%s（qdisc=%s，kernel=%s）\n\n' "$algo" "$qdisc" "$(uname -r)"
@@ -1614,6 +1878,7 @@ show_status() {
 
 show_config() {
     local component="$1" requested_instance="${2:-}" routed_stls="${3:-}" instance instances wrappers config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target uuid transport domain ws_path vmess_json vmess_link
+    local server_name reality_password short_id address vless_link client_tmp name encoded_name
     require_root
     if [[ -n "$requested_instance" ]]; then
         valid_instance_id "$requested_instance" || die "实例编号无效。"
@@ -1636,6 +1901,10 @@ show_config() {
             vmess)
                 instances="$(proxy_instance_dirs vmess)"; [[ -n "$instances" ]] || die "未安装 VMess 实例。"
                 while read -r instance; do [[ -z "$instance" ]] || show_config vmess "$instance"; done <<<"$instances"
+                return ;;
+            vless)
+                instances="$(proxy_instance_dirs vless)"; [[ -n "$instances" ]] || die "未安装 VLESS 实例。"
+                while read -r instance; do [[ -z "$instance" ]] || show_config vless "$instance"; done <<<"$instances"
                 return ;;
         esac
     fi
@@ -1714,6 +1983,28 @@ $(cat "$config")
 
 $(jq . <<<"$vmess_json")"
             print_config_block "VMess 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(jq . "$config")" ;;
+        vless)
+            instance="$requested_instance"; config="$(vless_instance_dir "$instance")/config.json"; meta="$(vless_instance_dir "$instance")/meta"
+            [[ -f "$config" ]] || die "VLESS 实例不存在。"
+            port="$(read_meta "$meta" PORT)"; transport="$(read_meta "$meta" TRANSPORT)"
+            uuid="$(jq -er '.inbounds[0].settings.clients[0].id' "$config")"
+            name="$(hostname)-VLESS-${instance}"; encoded_name="$(uri_encode "$name")"
+            new_temp_file client_tmp
+            if [[ "$transport" == reality ]]; then
+                server_name="$(read_meta "$meta" SERVER_NAME)"; reality_password="$(read_meta "$meta" REALITY_PASSWORD)"; short_id="$(read_meta "$meta" SHORT_ID)"
+                address="$PUBLIC_IP_CACHE"
+                vless_link="vless://${uuid}@$(uri_host "$address"):${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$(uri_encode "$server_name")&fp=chrome&pbk=$(uri_encode "$reality_password")&sid=${short_id}&type=tcp&headerType=none#${encoded_name}"
+                write_vless_client_config "$client_tmp" reality "$address" "$port" "$uuid" "$server_name" "$reality_password" "$short_id"
+            else
+                domain="$(read_meta "$meta" DOMAIN)"; ws_path="$(read_meta "$meta" PATH)"; address="$domain"
+                vless_link="vless://${uuid}@$(uri_host "$address"):${port}?encryption=none&security=tls&sni=$(uri_encode "$domain")&fp=chrome&type=ws&host=$(uri_encode "$domain")&path=$(uri_encode "$ws_path")#${encoded_name}"
+                write_vless_client_config "$client_tmp" ws-tls "$address" "$port" "$uuid" "$domain" "$ws_path"
+            fi
+            print_config_block "VLESS 客户端配置（实例 ${instance}）" "${vless_link}
+
+$(jq . "$client_tmp")"
+            rm -f "$client_tmp"
+            print_config_block "VLESS 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(jq . "$config")" ;;
         *) die "未知组件。" ;;
     esac
 }
@@ -1735,6 +2026,9 @@ reconfigure_component() {
         vmess)
             instance="$(select_proxy_instance vmess)"; version="$(read_meta "$(vmess_instance_dir "$instance")/meta" VERSION)"
             binary="$V2RAY_BIN" ;;
+        vless)
+            instance="$(select_proxy_instance vless)"; version="$(read_meta "$(vless_instance_dir "$instance")/meta" VERSION)"
+            binary="$XRAY_BIN" ;;
         *) die "未知组件：$component" ;;
     esac
     snapshot_manager_state snapshot
@@ -1748,6 +2042,7 @@ reconfigure_component() {
             ss|ss2022) SS_VERSION="$version"; configure_ss "$instance" ;;
             shadowtls) STLS_VERSION="$version"; configure_stls "$instance" ;;
             vmess) VMESS_VERSION="$version"; configure_vmess "$instance" ;;
+            vless) VLESS_VERSION="$version"; configure_vless "$instance" ;;
         esac
     ); then
         rm -rf -- "$snapshot"
@@ -1810,6 +2105,7 @@ doctor() {
     [[ ! -x "$SS_BIN" ]] || commands+=(jq tar xz sha256sum)
     [[ ! -x "$STLS_BIN" ]] || commands+=(jq openssl sha256sum)
     [[ ! -x "$V2RAY_BIN" ]] || commands+=(base64 jq unzip openssl sha256sum)
+    [[ ! -x "$XRAY_BIN" ]] || commands+=(jq unzip openssl sha256sum)
     os_name="$(sed -nE 's/^PRETTY_NAME="?([^\"]*)"?$/\1/p' /etc/os-release 2>/dev/null | head -n1 || true)"
     printf '系统：%s\n架构：%s\n包管理器：' "${os_name:-未知 Linux}" "$(uname -m)"
     package_manager 2>/dev/null || printf '未支持'; printf '\n'
@@ -1821,8 +2117,8 @@ doctor() {
         else printf '%s✗%s %-12s 缺失\n' "$RED" "$RESET" "$command"; failures=$((failures+1)); fi
     done
     [[ -d /run/systemd/system ]] || { warn "systemd 未运行。"; failures=$((failures+1)); }
-    if [[ -n "$(proxy_instance_dirs vmess)" ]] && have timedatectl; then
-        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] || warn "VMess 依赖准确系统时间，当前未确认 NTP 已同步。"
+    if { [[ -n "$(proxy_instance_dirs vmess)" ]] || [[ -n "$(proxy_instance_dirs vless)" ]]; } && have timedatectl; then
+        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] || warn "VMess/VLESS 依赖准确系统时间，当前未确认 NTP 已同步。"
     fi
     [[ "$(id -u)" -eq 0 ]] || warn "当前不是 root，仅执行只读检查。"
     return "$failures"
@@ -1834,13 +2130,13 @@ $APP $VERSION
 
 用法：
   $(basename "$0") status
-  $(basename "$0") install <bbr|snell|ss2022|shadowtls|vmess>
-  $(basename "$0") update <snell|ss2022|shadowtls|vmess>
-  $(basename "$0") configure <snell|ss2022|shadowtls|vmess>
-  $(basename "$0") remove <bbr|snell|ss2022|shadowtls|vmess> [实例号]
-  $(basename "$0") restart <snell|ss2022|shadowtls|vmess> [实例号]
-  $(basename "$0") logs <snell|ss2022|shadowtls|vmess> [行数] [实例号]
-  $(basename "$0") config <snell|ss2022|shadowtls|vmess> [实例号]
+  $(basename "$0") install <bbr|snell|ss2022|shadowtls|vmess|vless>
+  $(basename "$0") update <snell|ss2022|shadowtls|vmess|vless>
+  $(basename "$0") configure <snell|ss2022|shadowtls|vmess|vless>
+  $(basename "$0") remove <bbr|snell|ss2022|shadowtls|vmess|vless> [实例号]
+  $(basename "$0") restart <snell|ss2022|shadowtls|vmess|vless> [实例号]
+  $(basename "$0") logs <snell|ss2022|shadowtls|vmess|vless> [行数] [实例号]
+  $(basename "$0") config <snell|ss2022|shadowtls|vmess|vless> [实例号]
   $(basename "$0") doctor | check-update | self-install | menu
 
 选项：-y/--yes  --no-color  -h/--help  -V/--version
@@ -1849,22 +2145,22 @@ EOF
 
 install_component() {
     ensure_dependencies "$1"
-    case "$1" in bbr) enable_bbr;; snell) install_snell;; ss|ss2022) install_ss;; shadowtls) install_stls;; vmess) install_vmess;; *) die "未知组件：$1";; esac
+    case "$1" in bbr) enable_bbr;; snell) install_snell;; ss|ss2022) install_ss;; shadowtls) install_stls;; vmess) install_vmess;; vless) install_vless;; *) die "未知组件：$1";; esac
 }
 
 menu() {
     local choice component
     while true; do
         clear 2>/dev/null || true; show_status
-        printf '1. 启用 BBR          2. 安装/更新 Snell\n3. 安装/更新 ss-2022 4. 安装/更新 ShadowTLS\n5. 查看配置          6. 查看日志\n7. 重启服务          8. 卸载组件\n9. 环境检查          10. 安装 nw-manager 命令\n11. 检查脚本更新  12. 安装/更新 VMess\n0. 退出\n'
-        read -r -p '请选择 [0-12]: ' choice
+        printf '1. 启用 BBR          2. 安装/更新 Snell\n3. 安装/更新 ss-2022 4. 安装/更新 ShadowTLS\n5. 查看配置          6. 查看日志\n7. 重启服务          8. 卸载组件\n9. 环境检查          10. 安装 nw-manager 命令\n11. 检查脚本更新     12. 安装/更新 VMess\n13. 安装/更新 VLESS  0. 退出\n'
+        read -r -p '请选择 [0-13]: ' choice
         case "$choice" in
             1) install_component bbr;; 2) install_component snell;; 3) install_component ss2022;; 4) install_component shadowtls;;
-            5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; esac; show_config "$component";;
+            5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; esac; show_config "$component";;
             6) journalctl -u "$(select_component_service)" -n 100 --no-pager;;
             7) systemctl restart "$(select_component_service)";;
             8) component="$(select_component true)"; remove_component "$component";;
-            9) doctor || true;; 10) install_manager;; 11) check_manager_update;; 12) install_component vmess;; 0) return 0;; *) warn "选择无效。";;
+            9) doctor || true;; 10) install_manager;; 11) check_manager_update;; 12) install_component vmess;; 13) install_component vless;; 0) return 0;; *) warn "选择无效。";;
         esac
         [[ -t 0 ]] && { printf '\n按回车返回...'; read -r _; }
     done
@@ -1900,7 +2196,7 @@ main() {
             service="$(component_service "$component" "${3:-}")" || die "未知组件。"; journalctl -u "$service" -n "$lines" --no-pager;;
         config)
             component="${1:-}"; require_root
-            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; esac
+            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; esac
             show_config "$component" "${2:-}";;
         configure)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"

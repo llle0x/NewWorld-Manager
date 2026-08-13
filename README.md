@@ -1,15 +1,16 @@
 # NewWorld-Manager
 
-用于管理 Linux BBR、Snell Server、shadowsocks-rust（SS-2022）、ShadowTLS v3 和 V2Fly VMess 的独立 Bash 脚本。组件只从各自官方发布源下载，不执行第三方安装脚本。
+用于管理 Linux BBR、Snell Server、shadowsocks-rust（SS-2022）、ShadowTLS v3、V2Fly VMess 和 Xray VLESS 的独立 Bash 脚本。组件只从各自官方发布源下载，不执行第三方安装脚本。
 
 ## 主要功能
 
-- Snell、SS-2022、ShadowTLS、VMess 均支持 `1–99` 多实例。
+- Snell、SS-2022、ShadowTLS、VMess、VLESS 均支持 `1–99` 多实例。
 - 首次安装直接回车使用实例 `1`。
 - 已有实例时，输入新编号创建实例，直接回车检查并更新全部现有实例。
 - 查看配置时选择组件即可显示该组件全部实例；命令行可指定单个实例。
 - ShadowTLS 可绑定到指定 Snell/SS-2022 实例，同一后端也可配置多个 ShadowTLS 入口。
 - VMess 使用 V2Fly 官方核心，支持 TCP 和 WebSocket + TLS，默认使用 AEAD（`alterId: 0`）。
+- VLESS 使用 XTLS/Xray-core 官方核心，支持推荐的 REALITY + Vision，以及 WebSocket + TLS。
 - 更新前先检查官方版本；已是最新版时不下载、不重启。
 - 多实例批量更新任一服务启动失败时，恢复旧二进制并重启全部实例。
 - 旧版单实例配置会自动迁移为实例 `1`。
@@ -21,9 +22,9 @@
 - 发行版包括 Debian/Ubuntu、Fedora/RHEL/Oracle/Rocky/Alma/Amazon Linux、openSUSE、Arch Linux，以及运行 systemd 的 Alpine。
 - 架构：x86_64、aarch64；部分组件还提供 armv7/arm。
 
-SS-2022 与 ShadowTLS 使用官方 musl 静态构建，V2Fly 也提供多种 Linux 架构发行包。Snell 官方 Linux 二进制通常要求 glibc；在 Alpine/musl 上可能需要兼容层，脚本会在二进制无法执行时给出明确错误。
+SS-2022 与 ShadowTLS 使用官方 musl 静态构建，V2Fly 和 Xray 也提供多种 Linux 架构发行包。Snell 官方 Linux 二进制通常要求 glibc；在 Alpine/musl 上可能需要兼容层，脚本会在二进制无法执行时给出明确错误。
 
-建议至少 256 MiB 内存。依赖按组件延迟安装：Snell 不需要 `jq`/`xz`；SS-2022、ShadowTLS 和 VMess 使用 `jq` 解析 GitHub 官方发布信息或管理 JSON 配置。
+建议至少 256 MiB 内存。依赖按组件延迟安装：Snell 不需要 `jq`/`xz`；SS-2022、ShadowTLS、VMess 和 VLESS 使用 `jq` 解析 GitHub 官方发布信息或管理 JSON 配置。
 
 ## 安装与使用
 
@@ -49,8 +50,10 @@ nw-manager install snell
 nw-manager install ss2022
 nw-manager install shadowtls
 nw-manager install vmess
+nw-manager install vless
 nw-manager update snell
 nw-manager update vmess
+nw-manager update vless
 nw-manager configure snell
 nw-manager config snell          # 显示全部 Snell 实例
 nw-manager config snell 1        # 只显示实例 1
@@ -69,6 +72,7 @@ nw-manager remove shadowtls 1
 - 命令行 `nw-manager update <组件>` 不再询问实例号，会直接检查并更新该组件的全部实例，便于自动化。
 - `configure` 会重新生成所选实例配置；若失败会恢复此前配置和服务状态。
 - VMess WebSocket + TLS 会将已有证书和私钥安全复制到实例目录；证书续期后执行 `nw-manager update vmess` 可同步并重启相应实例。
+- VLESS REALITY + Vision 不需要域名证书；请选择支持 TLS 1.3、网络位置合适的非 CDN 伪装目标。WebSocket + TLS 的证书续期后执行 `nw-manager update vless` 同步。
 
 ## 配置输出
 
@@ -76,6 +80,7 @@ nw-manager remove shadowtls 1
 - SS-2022：`ss://` 链接或经 ShadowTLS 的 Surge 配置，以及完整服务端 JSON。
 - ShadowTLS：外部地址、端口、密码、SNI、后端实例和配套的后端客户端配置。
 - VMess：完整 `vmess://` 链接、客户端 JSON 及服务器 JSON。
+- VLESS：完整 `vless://` 链接、Xray 客户端 JSON 及服务器 JSON。
 - 一个后端绑定多个 ShadowTLS 时，会分别输出每个 ShadowTLS 入口的客户端配置。
 
 配置包含密钥，请勿公开分享。
@@ -94,7 +99,7 @@ nw-manager remove shadowtls 1
 
 - 配置：`/etc/newworld-manager`
 - 二进制：`/usr/local/lib/newworld-manager`
-- systemd：`newworld-snell-<实例>.service`、`newworld-ss2022-<实例>.service`、`newworld-shadowtls-<实例>.service`、`newworld-vmess-<实例>.service`
+- systemd：`newworld-snell-<实例>.service`、`newworld-ss2022-<实例>.service`、`newworld-shadowtls-<实例>.service`、`newworld-vmess-<实例>.service`、`newworld-vless-<实例>.service`
 - 全局命令：`/usr/local/bin/nw-manager` → `/usr/local/sbin/newworld-manager`
 
 ## 官方来源
@@ -104,6 +109,9 @@ nw-manager remove shadowtls 1
 - [ShadowTLS](https://github.com/ihciah/shadow-tls)
 - [V2Fly / V2Ray Core](https://github.com/v2fly/v2ray-core)
 - [VMess 官方配置文档](https://www.v2fly.org/config/protocols/vmess.html)
+- [XTLS / Xray-core](https://github.com/XTLS/Xray-core)
+- [VLESS 官方配置文档](https://xtls.github.io/config/inbounds/vless.html)
+- [REALITY 官方配置文档](https://xtls.github.io/config/transports/reality.html)
 - [Linux 网络 sysctl 文档](https://docs.kernel.org/admin-guide/sysctl/net.html)
 
 ## 许可

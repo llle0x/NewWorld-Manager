@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 5.1.1" ]]
+[[ "$inline_output" == "NewWorld-Manager 5.2.0" ]]
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.1.1" ]]
+[[ "$VERSION" == "5.2.0" ]]
 valid_instance_id 1
 valid_instance_id 99
 if valid_instance_id 0; then exit 1; fi
@@ -15,11 +15,16 @@ if valid_instance_id 100; then exit 1; fi
 [[ "$(ss_service 34)" == "newworld-ss2022-34.service" ]]
 [[ "$(vmess_service 56)" == "newworld-vmess-56.service" ]]
 [[ "$(vmess_instance_dir 56)" == "/etc/newworld-manager/vmess/instances/56" ]]
+[[ "$(vless_service 78)" == "newworld-vless-78.service" ]]
+[[ "$(vless_instance_dir 78)" == "/etc/newworld-manager/vless/instances/78" ]]
 valid_uuid 123e4567-e89b-42d3-a456-426614174000
 if command -v openssl >/dev/null 2>&1; then valid_uuid "$(random_uuid)"; fi
 valid_ws_path /vmess-test_1
 if valid_ws_path 'missing-leading-slash'; then exit 1; fi
 [[ "$(vmess_asset_pattern)" == 'v2ray-linux-64\.zip$' ]]
+[[ "$(xray_asset_pattern)" == 'Xray-linux-64\.zip$' ]]
+valid_reality_target example.com:443
+if valid_reality_target example.com; then exit 1; fi
 proxy_instance_dirs() { :; }
 show_existing_instances snell
 unset -f proxy_instance_dirs
@@ -30,11 +35,14 @@ unset -f proxy_instance_dirs
 [[ "$(select_snell_obfs <<<2)" == http ]]
 [[ "$(select_vmess_transport <<<1)" == tcp ]]
 [[ "$(select_vmess_transport <<<2)" == ws-tls ]]
+[[ "$(select_vless_transport <<<1)" == reality ]]
+[[ "$(select_vless_transport <<<2)" == ws-tls ]]
 [[ "$(select_component <<<1)" == snell ]]
 [[ "$(select_component <<<2)" == ss2022 ]]
 [[ "$(select_component <<<3)" == shadowtls ]]
 [[ "$(select_component <<<4)" == vmess ]]
-[[ "$(select_component true <<<5)" == bbr ]]
+[[ "$(select_component <<<5)" == vless ]]
+[[ "$(select_component true <<<6)" == bbr ]]
 version_is_newer 3.3.1 3.3.0
 version_is_newer 4.0.0 3.9.9
 if version_is_newer 3.3.0 3.3.0; then exit 1; fi
