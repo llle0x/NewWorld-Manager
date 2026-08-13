@@ -30,8 +30,14 @@ valid_release_version 1.24.0
 if valid_release_version '../../payload'; then exit 1; fi
 [[ "$(vmess_asset_pattern)" == 'v2ray-linux-64\.zip$' ]]
 [[ "$(xray_asset_pattern)" == 'Xray-linux-64\.zip$' ]]
-(uname() { printf aarch64; }; [[ "$(ss_asset_pattern)" == 'aarch64-unknown-linux-musl\.tar\.xz$' ]] && [[ "$(stls_asset_pattern)" == 'shadow-tls-aarch64-unknown-linux-musl$' ]] && [[ "$(vmess_asset_pattern)" == 'v2ray-linux-arm64-v8a\.zip$' ]] && [[ "$(xray_asset_pattern)" == 'Xray-linux-arm64-v8a\.zip$' ]])
-(uname() { printf armv7l; }; [[ "$(ss_asset_pattern)" == 'armv7-unknown-linux-musleabihf\.tar\.xz$' ]] && [[ "$(stls_asset_pattern)" == 'shadow-tls-armv7-unknown-linux-musleabihf$' ]] && [[ "$(vmess_asset_pattern)" == 'v2ray-linux-arm32-v7a\.zip$' ]] && [[ "$(xray_asset_pattern)" == 'Xray-linux-arm32-v7a\.zip$' ]])
+[[ "$(ss_asset_pattern aarch64)" == 'aarch64-unknown-linux-musl\.tar\.xz$' ]]
+[[ "$(stls_asset_pattern aarch64)" == 'shadow-tls-aarch64-unknown-linux-musl$' ]]
+[[ "$(vmess_asset_pattern aarch64)" == 'v2ray-linux-arm64-v8a\.zip$' ]]
+[[ "$(xray_asset_pattern aarch64)" == 'Xray-linux-arm64-v8a\.zip$' ]]
+[[ "$(ss_asset_pattern armv7)" == 'armv7-unknown-linux-musleabihf\.tar\.xz$' ]]
+[[ "$(stls_asset_pattern armv7)" == 'shadow-tls-armv7-unknown-linux-musleabihf$' ]]
+[[ "$(vmess_asset_pattern armv7)" == 'v2ray-linux-arm32-v7a\.zip$' ]]
+[[ "$(xray_asset_pattern armv7)" == 'Xray-linux-arm32-v7a\.zip$' ]]
 valid_reality_target example.com:443
 if valid_reality_target example.com; then exit 1; fi
 proxy_instance_dirs() { :; }

@@ -1064,7 +1064,8 @@ install_snell() {
 }
 
 ss_asset_pattern() {
-    case "$(architecture)" in
+    local arch="${1:-$(architecture)}"
+    case "$arch" in
         x86_64) printf 'x86_64-unknown-linux-musl\.tar\.xz$' ;;
         aarch64) printf 'aarch64-unknown-linux-musl\.tar\.xz$' ;;
         armv7) printf 'armv7-unknown-linux-musleabihf\.tar\.xz$' ;;
@@ -1170,7 +1171,8 @@ install_ss() {
 }
 
 stls_asset_pattern() {
-    case "$(architecture)" in
+    local arch="${1:-$(architecture)}"
+    case "$arch" in
         x86_64) printf 'shadow-tls-x86_64-unknown-linux-musl$' ;;
         aarch64) printf 'shadow-tls-aarch64-unknown-linux-musl$' ;;
         armv7) printf 'shadow-tls-armv7-unknown-linux-musleabihf$' ;;
@@ -1328,7 +1330,8 @@ install_stls() {
 }
 
 vmess_asset_pattern() {
-    case "$(architecture)" in
+    local arch="${1:-$(architecture)}"
+    case "$arch" in
         x86_64) printf 'v2ray-linux-64\\.zip$' ;;
         aarch64) printf 'v2ray-linux-arm64-v8a\\.zip$' ;;
         armv7) printf 'v2ray-linux-arm32-v7a\\.zip$' ;;
@@ -1549,7 +1552,8 @@ install_vmess() {
 }
 
 xray_asset_pattern() {
-    case "$(architecture)" in
+    local arch="${1:-$(architecture)}"
+    case "$arch" in
         x86_64) printf 'Xray-linux-64\\.zip$' ;;
         aarch64) printf 'Xray-linux-arm64-v8a\\.zip$' ;;
         armv7) printf 'Xray-linux-arm32-v7a\\.zip$' ;;
@@ -2172,21 +2176,26 @@ verify_managed_instance() {
     systemctl is-active --quiet "$service" || { warn "$label 服务未运行。"; return 1; }
     case "$kind" in
         snell)
-            grep -Eq '^listen[[:space:]]*=' "$config" && grep -Eq '^psk[[:space:]]*=' "$config" && grep -Eq '^version[[:space:]]*=[[:space:]]*[56]$' "$config" || \
-                { warn "$label 配置字段不完整。"; return 1; } ;;
+            if ! grep -Eq '^listen[[:space:]]*=' "$config" || ! grep -Eq '^psk[[:space:]]*=' "$config" || \
+                ! grep -Eq '^version[[:space:]]*=[[:space:]]*[56]$' "$config"; then
+                warn "$label 配置字段不完整。"; return 1
+            fi ;;
         ss2022)
-            have jq && jq -e '.server and (.server_port | type == "number") and .password and (.method | startswith("2022-"))' "$config" >/dev/null || \
-                { warn "$label JSON 配置无效。"; return 1; } ;;
+            if ! have jq || ! jq -e '.server and (.server_port | type == "number") and .password and (.method | startswith("2022-"))' "$config" >/dev/null; then
+                warn "$label JSON 配置无效。"; return 1
+            fi ;;
         shadowtls)
             [[ -n "$(read_meta "$config" LISTEN_PORT 2>/dev/null || true)" && -n "$(read_meta "$config" BACKEND_PORT 2>/dev/null || true)" && \
                 -n "$(read_meta "$config" TLS_HOST 2>/dev/null || true)" && -n "$(read_meta "$config" PASSWORD 2>/dev/null || true)" ]] || \
                 { warn "$label 环境配置字段不完整。"; return 1; } ;;
         vmess)
-            [[ -x "$V2RAY_BIN" ]] && "$V2RAY_BIN" test -config "$config" >/dev/null 2>&1 || \
-                { warn "$label 未通过 V2Fly 核心校验。"; return 1; } ;;
+            if [[ ! -x "$V2RAY_BIN" ]] || ! "$V2RAY_BIN" test -config "$config" >/dev/null 2>&1; then
+                warn "$label 未通过 V2Fly 核心校验。"; return 1
+            fi ;;
         vless)
-            [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" run -test -config "$config" >/dev/null 2>&1 || \
-                { warn "$label 未通过 Xray 核心校验。"; return 1; } ;;
+            if [[ ! -x "$XRAY_BIN" ]] || ! "$XRAY_BIN" run -test -config "$config" >/dev/null 2>&1; then
+                warn "$label 未通过 Xray 核心校验。"; return 1
+            fi ;;
     esac
     printf '%s✓%s %-20s 配置及服务正常\n' "$GREEN" "$RESET" "$label"
 }
