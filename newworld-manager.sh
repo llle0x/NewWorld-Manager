@@ -1064,8 +1064,11 @@ install_snell() {
 }
 
 ss_asset_pattern() {
-    local arch="${1:-$(architecture)}"
-    case "$arch" in
+    ss_asset_pattern_for_arch "$(architecture)"
+}
+
+ss_asset_pattern_for_arch() {
+    case "$1" in
         x86_64) printf 'x86_64-unknown-linux-musl\.tar\.xz$' ;;
         aarch64) printf 'aarch64-unknown-linux-musl\.tar\.xz$' ;;
         armv7) printf 'armv7-unknown-linux-musleabihf\.tar\.xz$' ;;
@@ -1171,8 +1174,11 @@ install_ss() {
 }
 
 stls_asset_pattern() {
-    local arch="${1:-$(architecture)}"
-    case "$arch" in
+    stls_asset_pattern_for_arch "$(architecture)"
+}
+
+stls_asset_pattern_for_arch() {
+    case "$1" in
         x86_64) printf 'shadow-tls-x86_64-unknown-linux-musl$' ;;
         aarch64) printf 'shadow-tls-aarch64-unknown-linux-musl$' ;;
         armv7) printf 'shadow-tls-armv7-unknown-linux-musleabihf$' ;;
@@ -1330,8 +1336,11 @@ install_stls() {
 }
 
 vmess_asset_pattern() {
-    local arch="${1:-$(architecture)}"
-    case "$arch" in
+    vmess_asset_pattern_for_arch "$(architecture)"
+}
+
+vmess_asset_pattern_for_arch() {
+    case "$1" in
         x86_64) printf 'v2ray-linux-64\\.zip$' ;;
         aarch64) printf 'v2ray-linux-arm64-v8a\\.zip$' ;;
         armv7) printf 'v2ray-linux-arm32-v7a\\.zip$' ;;
@@ -1552,8 +1561,11 @@ install_vmess() {
 }
 
 xray_asset_pattern() {
-    local arch="${1:-$(architecture)}"
-    case "$arch" in
+    xray_asset_pattern_for_arch "$(architecture)"
+}
+
+xray_asset_pattern_for_arch() {
+    case "$1" in
         x86_64) printf 'Xray-linux-64\\.zip$' ;;
         aarch64) printf 'Xray-linux-arm64-v8a\\.zip$' ;;
         armv7) printf 'Xray-linux-arm32-v7a\\.zip$' ;;
