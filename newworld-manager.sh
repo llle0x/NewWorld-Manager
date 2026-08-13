@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# NewWorld-Manager
-# Independent Linux manager for BBR, Snell, Shadowsocks 2022, ShadowTLS, VMess and VLESS.
-# It never downloads or executes third-party installation scripts.
+# NewWorld-Manager: independent Linux proxy manager.
 
 set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.2.5"
+readonly VERSION="5.3.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -2080,7 +2078,7 @@ show_config() {
                     [[ "$protocol" != 6 || "$mode" == default || -z "$mode" ]] || client_config+=", mode=${mode}"
                     [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
                     client_config+=", ${stls_options}"
-                    print_config_block "Snell 客户端配置（实例 ${instance}，经 ShadowTLS #${target}）" "$client_config"
+                    print_config_block "Snell 客户端配置（实例 ${instance}，经 ShadowTLS #${target}，Surge [Proxy]）" "$client_config"
                 done <<<"$wrappers"
             else
                 external_port="$port"; stls_options=""
@@ -2101,11 +2099,12 @@ show_config() {
                     external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
                     stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
                     client_config="$(hostname)-SS2022-${instance}-STLS-${target} = ss, $(public_ip), ${external_port}, encrypt-method=${method}, password=${password}, ${stls_options}"
-                    print_config_block "SS-2022 客户端配置（实例 ${instance}，经 ShadowTLS #${target}）" "$client_config"
+                    print_config_block "SS-2022 客户端配置（实例 ${instance}，经 ShadowTLS #${target}，Surge [Proxy]）" "$client_config"
                 done <<<"$wrappers"
             else
                 ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(uri_host "$(public_ip)"):${port}#NewWorld-SS2022-${instance}"
                 print_config_block "SS-2022 客户端链接（实例 ${instance}）" "$ss_url"
+                print_config_block "SS-2022 客户端配置（实例 ${instance}，Surge [Proxy]）" "$(hostname)-SS2022-${instance} = ss, $(public_ip), ${port}, encrypt-method=${method}, password=${password}, udp-relay=true"
             fi
             print_config_block "SS-2022 服务器配置（实例 ${instance}）" "$(jq . "$config")" ;;
         shadowtls)
@@ -2133,6 +2132,12 @@ $(cat "$config")
             print_config_block "VMess 客户端配置（实例 ${instance}）" "${vmess_link}
 
 $(jq . <<<"$vmess_json")"
+            if [[ "$transport" == ws-tls ]]; then
+                client_config="$(hostname)-VMess-${instance} = vmess, ${domain}, ${port}, username=${uuid}, vmess-aead=true, ws=true, tls=true, sni=${domain}, ws-path=${ws_path}, ws-headers=Host:${domain}"
+            else
+                client_config="$(hostname)-VMess-${instance} = vmess, $(public_ip), ${port}, username=${uuid}, vmess-aead=true"
+            fi
+            print_config_block "VMess 客户端配置（实例 ${instance}，Surge [Proxy]）" "$client_config"
             print_config_block "VMess 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(jq . "$config")" ;;
         vless)
             instance="$requested_instance"; config="$(vless_instance_dir "$instance")/config.json"; meta="$(vless_instance_dir "$instance")/meta"
@@ -2154,6 +2159,7 @@ $(jq . <<<"$vmess_json")"
             print_config_block "VLESS 客户端配置（实例 ${instance}）" "${vless_link}
 
 $(jq . "$client_tmp")"
+            print_config_block "VLESS 与 Surge" "Surge 当前不支持 VLESS，无法生成可用的 [Proxy] 配置；请使用上方 VLESS 链接或 JSON。"
             rm -f "$client_tmp"
             print_config_block "VLESS 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(jq . "$config")" ;;
         *) die "未知组件。" ;;
