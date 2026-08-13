@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="4.2.2"
+readonly VERSION="5.0.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -24,10 +24,11 @@ readonly SNELL_ROOT="$ROOT_DIR/snell"
 readonly SS_ROOT="$ROOT_DIR/ss2022"
 readonly STLS_SERVICE_PREFIX="newworld-shadowtls"
 readonly STLS_ROOT="$ROOT_DIR/shadowtls"
-readonly STLS_SERVICE="${STLS_SERVICE_PREFIX}.service" # Legacy service name used only during migration.
 
 YES=false
+UPDATE_ONLY=false
 NO_COLOR="${NO_COLOR:-}"
+PUBLIC_IP_CACHE=""
 declare -a TEMP_PATHS=()
 for _arg in "$@"; do [[ "$_arg" == "--no-color" ]] && NO_COLOR=1; done
 unset _arg
@@ -175,6 +176,9 @@ valid_host() { [[ "$1" =~ ^[A-Za-z0-9.-]+$ && "$1" == *.* && "$1" != .* && "$1" 
 valid_psk() { [[ ${#1} -ge 16 && ${#1} -le 255 && "$1" =~ ^[A-Za-z0-9._~-]+$ ]]; }
 valid_dns() { [[ "$1" =~ ^[A-Za-z0-9.,:_-]+$ ]]; }
 port_unused() { ! ss -H -lntup 2>/dev/null | awk '{print $5}' | grep -Eq "(^|[.:])$1$"; }
+ipv6_available() {
+    [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]] && [[ "$(</proc/sys/net/ipv6/conf/all/disable_ipv6)" == 0 ]] && ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '
+}
 
 version_is_newer() {
     local candidate="$1" current="$2" candidate_major candidate_minor candidate_patch current_major current_minor current_patch
@@ -251,6 +255,7 @@ migrate_proxy_legacy() {
         *) return 1 ;;
     esac
     [[ -f "$old_config" ]] || return 0
+    [[ "$(id -u)" -eq 0 ]] || { warn "检测到旧版 $kind 配置，请使用 root 运行一次菜单完成迁移。"; return 0; }
     instance_dir="$root/instances/1"; install -d -m 0750 -o root -g "$SERVICE_USER" "$root/instances" "$instance_dir"
     mv "$old_config" "$instance_dir/"
     [[ ! -f "$old_meta" ]] || mv "$old_meta" "$instance_dir/"
@@ -259,14 +264,40 @@ migrate_proxy_legacy() {
         snell) write_service "$new_service" "NewWorld Snell Instance 1" "$SNELL_BIN -c $instance_dir/snell.conf" ;;
         ss2022) write_service "$new_service" "NewWorld SS-2022 Instance 1" "$SS_BIN -c $instance_dir/config.json" ;;
     esac
-    reload_start "$new_service"; ok "已将原 $kind 配置迁移为实例 1。"
+    reload_start "$new_service" || die "旧 $kind 配置迁移后的服务启动失败。"
+    ok "已将原 $kind 配置迁移为实例 1。"
 }
 
 proxy_instance_dirs() {
     local kind="$1" root
     migrate_proxy_legacy "$kind"
     [[ "$kind" == snell ]] && root="$SNELL_ROOT" || root="$SS_ROOT"
-    find "$root/instances" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n
+    find "$root/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -n || true
+}
+
+snell_installed_protocol() {
+    local instance protocol detected=""
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        protocol="$(read_meta "$(snell_instance_dir "$instance")/meta" PROTOCOL 2>/dev/null || printf 5)"
+        [[ -z "$detected" || "$detected" == "$protocol" ]] || die "检测到 Snell v5 与 v6 混合实例；请先修复实例配置。"
+        detected="$protocol"
+    done < <(proxy_instance_dirs snell)
+    printf '%s' "$detected"
+}
+
+refresh_snell_tfo_sysctl() {
+    local instance enabled=false config="/etc/sysctl.d/99-newworld-snell.conf"
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        grep -Eq '^tfo[[:space:]]*=[[:space:]]*true$' "$(snell_instance_dir "$instance")/snell.conf" 2>/dev/null && { enabled=true; break; }
+    done < <(proxy_instance_dirs snell)
+    if [[ "$enabled" == true ]]; then
+        printf 'net.ipv4.tcp_fastopen = 3\n' >"$config"
+        sysctl -p "$config" >/dev/null 2>&1 || warn "内核未接受 TCP Fast Open 参数，配置文件已保留。"
+    else
+        rm -f "$config"
+    fi
 }
 
 show_existing_instances() {
@@ -294,6 +325,7 @@ select_proxy_instance() {
 shadowtls_migrate_legacy() {
     local instance_dir
     [[ -f "$STLS_ROOT/environment" ]] || return 0
+    [[ "$(id -u)" -eq 0 ]] || { warn "检测到旧版 ShadowTLS 配置，请使用 root 运行一次菜单完成迁移。"; return 0; }
     instance_dir="$(shadowtls_instance_dir 1)"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$STLS_ROOT/instances" "$instance_dir"
     mv "$STLS_ROOT/environment" "$STLS_ROOT/meta" "$instance_dir/"
@@ -302,14 +334,14 @@ shadowtls_migrate_legacy() {
     rm -f "$SYSTEMD_DIR/${STLS_SERVICE_PREFIX}.service"
     write_service "$(shadowtls_service 1)" "NewWorld ShadowTLS v3 Instance 1" \
         "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$instance_dir/environment"
-    reload_start "$(shadowtls_service 1)"
+    reload_start "$(shadowtls_service 1)" || die "旧 ShadowTLS 配置迁移后的服务启动失败。"
     systemctl daemon-reload
     ok "已将原 ShadowTLS 配置迁移为实例 1。"
 }
 
 shadowtls_instance_dirs() {
     shadowtls_migrate_legacy
-    find "$STLS_ROOT/instances" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -n
+    find "$STLS_ROOT/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -n || true
 }
 
 select_shadowtls_instance() {
@@ -317,22 +349,24 @@ select_shadowtls_instance() {
     while read -r instance; do [[ -z "$instance" ]] || instances+=("$instance"); done < <(shadowtls_instance_dirs)
     ((${#instances[@]})) || die "未安装 ShadowTLS 实例。"
     printf 'ShadowTLS 实例：' >&2
-    for instance in "${instances[@]}"; do printf ' %s) %s' "$instance" "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET)" >&2; done
+    for instance in "${instances[@]}"; do
+        printf ' %s) %s #%s' "$instance" "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET)" \
+            "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)" >&2
+    done
     printf '\n' >&2
     read -r -p '请选择实例编号: ' input
     valid_instance_id "$input" && [[ -d "$(shadowtls_instance_dir "$input")" ]] || die "实例不存在。"
     printf '%s' "$input"
 }
 
-shadowtls_first_instance_for_target() {
-    local target="$1" backend_instance="${2:-}" instance candidate
+shadowtls_instances_for_target() {
+    local target="$1" backend_instance="$2" instance candidate
     while read -r instance; do
         [[ -z "$instance" ]] && continue
         [[ "$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET 2>/dev/null || true)" == "$target" ]] || continue
         candidate="$(read_meta "$(shadowtls_instance_dir "$instance")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
-        [[ -z "$backend_instance" || "$candidate" == "$backend_instance" ]] && { printf '%s' "$instance"; return 0; }
+        [[ "$candidate" == "$backend_instance" ]] && printf '%s\n' "$instance"
     done < <(shadowtls_instance_dirs)
-    return 1
 }
 
 shadowtls_backend_in_use() {
@@ -360,18 +394,21 @@ package_manager() {
     if have apt-get; then printf apt
     elif have dnf; then printf dnf
     elif have yum; then printf yum
+    elif have zypper; then printf zypper
+    elif have pacman; then printf pacman
     elif have apk; then printf apk
-    else die "不支持当前系统的包管理器。"
+    else return 1
     fi
 }
 
 ensure_dependencies() {
     local profile="${1:-base}" commands=() missing=() packages=() command manager package memory_limit=""
     case "$profile" in
-        base|bbr) return 0 ;;
-        snell) commands=(curl unzip openssl ss) ;;
-        ss|ss2022) commands=(base64 curl jq tar xz openssl sha256sum ss) ;;
-        shadowtls) commands=(curl jq openssl sha256sum ss) ;;
+        base) return 0 ;;
+        bbr) commands=(sysctl) ;;
+        snell) commands=(curl unzip openssl ip ss) ;;
+        ss|ss2022) commands=(base64 curl jq tar xz openssl sha256sum ip ss) ;;
+        shadowtls) commands=(curl jq openssl sha256sum ip ss) ;;
         self-install) commands=(curl) ;;
         *) die "未知的依赖配置：$profile" ;;
     esac
@@ -379,7 +416,7 @@ ensure_dependencies() {
         have "$command" || missing+=("$command")
     done
     ((${#missing[@]} == 0)) && return 0
-    manager="$(package_manager)"
+    manager="$(package_manager)" || die "不支持当前系统的包管理器。"
     info "安装运行依赖：${missing[*]}"
     if [[ -r /sys/fs/cgroup/memory.max ]]; then memory_limit="$(</sys/fs/cgroup/memory.max)"
     elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then memory_limit="$(</sys/fs/cgroup/memory/memory.limit_in_bytes)"; fi
@@ -388,8 +425,12 @@ ensure_dependencies() {
     fi
     for command in "${missing[@]}"; do
         case "$manager:$command" in
-            apt:xz) package=xz-utils;; apt:ss) package=iproute2;;
-            dnf:ss|yum:ss) package=iproute;; apk:ss) package=iproute2;;
+            apt:xz) package=xz-utils;; apt:ss|apt:ip) package=iproute2;;
+            apt:sysctl) package=procps;;
+            dnf:sysctl|yum:sysctl) package=procps-ng;;
+            zypper:sysctl|pacman:sysctl|apk:sysctl) package=procps;;
+            dnf:ss|dnf:ip|yum:ss|yum:ip) package=iproute;;
+            zypper:ss|zypper:ip|pacman:ss|pacman:ip|apk:ss|apk:ip) package=iproute2;;
             *:base64|*:sha256sum) package=coreutils;;
             *) package="$command";;
         esac
@@ -400,18 +441,22 @@ ensure_dependencies() {
         apt)
             apt-get -o Acquire::Languages=none -o Acquire::PDiffs=false update || die "apt-get update 失败；若显示 Killed，请增加内存。"
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}" || die "依赖安装失败；若显示 Killed，请增加内存。" ;;
-        dnf) dnf install -y "${packages[@]}" ;;
-        yum) yum install -y "${packages[@]}" ;;
-        apk) apk add --no-cache "${packages[@]}" ;;
+        dnf) dnf install -y "${packages[@]}" || die "dnf 依赖安装失败。" ;;
+        yum) yum install -y "${packages[@]}" || die "yum 依赖安装失败。" ;;
+        zypper) zypper --non-interactive install --no-recommends "${packages[@]}" || die "zypper 依赖安装失败。" ;;
+        pacman) pacman -S --needed --noconfirm "${packages[@]}" || die "pacman 依赖安装失败；请先更新系统软件包数据库。" ;;
+        apk) apk add --no-cache "${packages[@]}" || die "apk 依赖安装失败。" ;;
     esac
 }
 
 ensure_service_user() {
+    local nologin_shell
     id "$SERVICE_USER" >/dev/null 2>&1 && return 0
+    nologin_shell="$(command -v nologin 2>/dev/null || printf /bin/false)"
     if have useradd; then
-        useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$SERVICE_USER"
+        useradd --system --no-create-home --home-dir /nonexistent --shell "$nologin_shell" "$SERVICE_USER"
     elif have adduser; then
-        adduser -S -D -H -h /nonexistent -s /sbin/nologin "$SERVICE_USER"
+        adduser -S -D -H -h /nonexistent -s "$nologin_shell" "$SERVICE_USER"
     else
         die "无法创建服务用户。"
     fi
@@ -479,19 +524,26 @@ atomic_binary_install() {
     mv -f "${destination}.new" "$destination"
 }
 
-restart_or_rollback() {
-    local service="$1" binary="$2"
-    if systemctl restart "$service" && systemctl is-active --quiet "$service"; then
-        rm -f "${binary}.previous"
-        return 0
+restart_services_or_rollback() {
+    local binary="$1" service failed=""; shift
+    local -a services=("$@")
+    if ((${#services[@]} == 0)); then rm -f "${binary}.previous"; return 0; fi
+    for service in "${services[@]}"; do
+        if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
+            failed="$service"
+            break
+        fi
+    done
+    if [[ -n "$failed" ]]; then
+        journalctl -u "$failed" -n 30 --no-pager >&2 || true
+        if [[ -f "${binary}.previous" ]]; then
+            warn "批量更新启动失败，正在恢复旧二进制并重启全部实例。"
+            mv -f "${binary}.previous" "$binary"
+            for service in "${services[@]}"; do systemctl restart "$service" >/dev/null 2>&1 || true; done
+        fi
+        die "$failed 更新失败，已尝试回滚全部实例。"
     fi
-    if [[ -f "${binary}.previous" ]]; then
-        warn "新版本启动失败，正在恢复旧二进制。"
-        mv -f "${binary}.previous" "$binary"
-        systemctl restart "$service" || true
-    fi
-    journalctl -u "$service" -n 30 --no-pager >&2 || true
-    die "$service 更新失败，已尝试回滚。"
+    rm -f "${binary}.previous"
 }
 
 read_meta() {
@@ -501,11 +553,38 @@ read_meta() {
 }
 
 write_meta() {
-    local file="$1"; shift
-    : >"$file"
-    printf '%s\n' "$@" >>"$file"
-    chown root:"$SERVICE_USER" "$file"
-    chmod 0640 "$file"
+    local file="$1" tmp; shift
+    new_temp_file tmp
+    printf '%s\n' "$@" >"$tmp"
+    install -m 0640 -o root -g "$SERVICE_USER" "$tmp" "$file"
+    rm -f "$tmp"
+}
+
+sync_snell_meta_versions() {
+    local instance meta
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; meta="$(snell_instance_dir "$instance")/meta"
+        write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$(read_meta "$meta" PROTOCOL)" \
+            "PORT=$(read_meta "$meta" PORT)" "BIND=$(read_meta "$meta" BIND)"
+    done < <(proxy_instance_dirs snell)
+}
+
+sync_ss_meta_versions() {
+    local instance meta
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; meta="$(ss_instance_dir "$instance")/meta"
+        write_meta "$meta" "VERSION=$SS_VERSION" "PORT=$(read_meta "$meta" PORT)" "BIND=$(read_meta "$meta" BIND)"
+    done < <(proxy_instance_dirs ss2022)
+}
+
+sync_stls_meta_versions() {
+    local instance meta
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; meta="$(shadowtls_instance_dir "$instance")/meta"
+        write_meta "$meta" "VERSION=$STLS_VERSION" "TARGET=$(read_meta "$meta" TARGET)" \
+            "TARGET_INSTANCE=$(read_meta "$meta" TARGET_INSTANCE 2>/dev/null || printf 1)" "PORT=$(read_meta "$meta" PORT)" \
+            "BACKEND_PORT=$(read_meta "$meta" BACKEND_PORT)" "PREVIOUS_BIND=$(read_meta "$meta" PREVIOUS_BIND)"
+    done < <(shadowtls_instance_dirs)
 }
 
 service_user_group() { id -gn "$SERVICE_USER"; }
@@ -516,7 +595,7 @@ is_container() {
 }
 
 write_service() {
-    local name="$1" description="$2" exec_start="$3" env_file="${4:-}" run_user run_group
+    local name="$1" description="$2" exec_start="$3" env_file="${4:-}" run_user run_group unit_tmp
     if is_container; then
         run_user=root; run_group=root
         warn "检测到受限容器：$name 将以 root 运行，并跳过 systemd 命名空间隔离。"
@@ -524,11 +603,12 @@ write_service() {
         run_user="$SERVICE_USER"; run_group="$(service_user_group)"
         verify_service_executable "${exec_start%% *}"
     fi
+    new_temp_file unit_tmp
     {
         printf '[Unit]\nDescription=%s\nAfter=network-online.target\nWants=network-online.target\n\n' "$description"
         printf '[Service]\nType=simple\nUser=%s\nGroup=%s\n' "$run_user" "$run_group"
         [[ -n "$env_file" ]] && printf 'EnvironmentFile=%s\n' "$env_file"
-        printf 'ExecStart=%s\nRestart=on-failure\nRestartSec=3s\nLimitNOFILE=1048576\n' "$exec_start"
+        printf 'ExecStart=%s\nRestart=on-failure\nRestartSec=3s\nLimitNOFILE=1048576\nUMask=0027\n' "$exec_start"
         if ! is_container; then
             printf 'AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n'
             printf 'NoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\n'
@@ -536,20 +616,24 @@ write_service() {
             printf 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n'
         fi
         printf '\n[Install]\nWantedBy=multi-user.target\n'
-    } >"$SYSTEMD_DIR/$name"
-    chmod 0644 "$SYSTEMD_DIR/$name"
+    } >"$unit_tmp"
+    install -m 0644 -o root -g root "$unit_tmp" "$SYSTEMD_DIR/$name"; rm -f "$unit_tmp"
 }
 
 reload_start() {
+    local attempt=0
     systemctl daemon-reload
     systemctl enable "$1" >/dev/null
+    systemctl reset-failed "$1" >/dev/null 2>&1 || true
     systemctl restart "$1"
-    sleep 1
-    systemctl is-active --quiet "$1" || {
-        journalctl -u "$1" -n 30 --no-pager >&2
-        systemctl stop "$1" >/dev/null 2>&1 || true
-        die "$1 启动失败。"
-    }
+    while ((attempt < 5)); do
+        systemctl is-active --quiet "$1" && return 0
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    journalctl -u "$1" -n 30 --no-pager >&2 || true
+    systemctl stop "$1" >/dev/null 2>&1 || true
+    return 1
 }
 
 firewall_active() {
@@ -621,12 +705,17 @@ firewall_close() {
 
 snapshot_manager_state() {
     local variable="$1" state_dir service file
+    local -a service_files=()
     new_temp_dir state_dir
     install -d -m 0700 "$state_dir/root" "$state_dir/services" "$state_dir/sysctl" "$state_dir/bin"
     cp -a "$ROOT_DIR/." "$state_dir/root/"
-    for service in "$SNELL_SERVICE" "$SS_SERVICE" "$STLS_SERVICE"; do
-        file="$SYSTEMD_DIR/$service"
-        [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/services/$service"
+    : >"$state_dir/active"
+    shopt -s nullglob
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service)
+    shopt -u nullglob
+    for file in "${service_files[@]}"; do
+        service="${file##*/}"
+        cp -a "$file" "$state_dir/services/$service"
         systemctl is-active --quiet "$service" && printf '%s\n' "$service" >>"$state_dir/active" || true
     done
     for file in /etc/sysctl.d/99-newworld-snell.conf /etc/sysctl.d/99-newworld-bbr.conf; do
@@ -639,15 +728,24 @@ snapshot_manager_state() {
 }
 
 restore_manager_state() {
-    local snapshot="$1" service file name rule tool port proto
+    local snapshot="$1" service file name rule tool port proto current_rules
+    local -a service_files=()
     warn "操作失败，正在恢复此前配置与服务状态。"
     set +e
+    new_temp_file current_rules
+    [[ ! -f "$FIREWALL_DB" ]] || cp -a "$FIREWALL_DB" "$current_rules"
+    while IFS='|' read -r rule tool; do
+        [[ -n "$rule" && -n "$tool" ]] || continue
+        firewall_close "${rule%/*}" "${rule##*/}"
+    done <"$current_rules"
     for name in snell ss2022 shadowtls firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
     cp -a "$snapshot/root/." "$ROOT_DIR/"
-    for service in "$SNELL_SERVICE" "$SS_SERVICE" "$STLS_SERVICE"; do
-        file="$SYSTEMD_DIR/$service"
-        if [[ -f "$snapshot/services/$service" ]]; then cp -a "$snapshot/services/$service" "$file"; else rm -f "$file"; fi
-    done
+    shopt -s nullglob
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service)
+    for file in "${service_files[@]}"; do systemctl stop "${file##*/}" >/dev/null 2>&1 || true; rm -f "$file"; done
+    service_files=("$snapshot/services"/*.service)
+    for file in "${service_files[@]}"; do cp -a "$file" "$SYSTEMD_DIR/${file##*/}"; done
+    shopt -u nullglob
     for name in 99-newworld-snell.conf 99-newworld-bbr.conf; do
         file="/etc/sysctl.d/$name"
         if [[ -f "$snapshot/sysctl/$name" ]]; then cp -a "$snapshot/sysctl/$name" "$file"; else rm -f "$file"; fi
@@ -658,8 +756,10 @@ restore_manager_state() {
         [[ ! -f "$snapshot/bin/$name" ]] || cp -a "$snapshot/bin/$name" "$file"
     done
     systemctl daemon-reload
-    for service in "$SNELL_SERVICE" "$SS_SERVICE" "$STLS_SERVICE"; do
-        if grep -Fxq "$service" "$snapshot/active" 2>/dev/null; then systemctl restart "$service"
+    shopt -s nullglob; service_files=("$snapshot/services"/*.service); shopt -u nullglob
+    for file in "${service_files[@]}"; do
+        service="${file##*/}"
+        if grep -Fxq "$service" "$snapshot/active"; then systemctl restart "$service"
         else systemctl stop "$service" >/dev/null 2>&1; fi
     done
     while IFS='|' read -r rule tool; do
@@ -672,11 +772,15 @@ restore_manager_state() {
 }
 
 public_ip() {
-    curl --proto '=https' --tlsv1.2 -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || printf '<服务器IP>'
+    if [[ -z "$PUBLIC_IP_CACHE" ]]; then
+        PUBLIC_IP_CACHE="$(curl --proto '=https' --tlsv1.2 -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || \
+            curl --proto '=https' --tlsv1.2 -6fsS --max-time 5 https://api64.ipify.org 2>/dev/null || printf '<服务器IP>')"
+    fi
+    printf '%s' "$PUBLIC_IP_CACHE"
 }
 
 install_snell_binary() {
-    local protocol="$1" arch version versions stable page url tmpdir zip candidate pattern
+    local protocol="$1" arch version versions stable page url tmpdir zip candidate pattern probe_status
     [[ "$protocol" == 5 || "$protocol" == 6 ]] || die "Snell 版本只能是 5 或 6。"
     arch="$(architecture)"; [[ "$arch" == x86_64 ]] && arch=amd64; [[ "$arch" == armv7 ]] && arch=armv7l
     if [[ "$protocol" == 6 ]]; then
@@ -688,7 +792,7 @@ install_snell_binary() {
     page="$tmpdir/release-notes"
     download "https://kb.nssurge.com/surge-knowledge-base/release-notes/snell" "$page"
     pattern="snell-server-v${protocol}\\.[0-9]+\\.[0-9]+[A-Za-z0-9]*-linux-${arch}\\.zip"
-    versions="$(grep -Eo "$pattern" "$page" | sed -E 's/snell-server-(v[^-]+)-.*/\1/' | sort -u)"
+    versions="$(grep -Eo "$pattern" "$page" | sed -E 's/snell-server-(v[^-]+)-.*/\1/' | sort -u || true)"
     stable="$(grep -E "^v${protocol}\\.[0-9]+\\.[0-9]+$" <<<"$versions" | sort -V | tail -n1 || true)"
     if [[ -n "$stable" ]]; then
         version="$stable"
@@ -703,19 +807,22 @@ install_snell_binary() {
     unzip -q "$zip" -d "$tmpdir/unpack"
     candidate="$(find "$tmpdir/unpack" -type f -name snell-server -print -quit)"
     [[ -n "$candidate" ]] || die "Snell 压缩包中缺少服务器程序。"
-    chmod +x "$candidate"; "$candidate" --help >/dev/null 2>&1 || true
+    chmod +x "$candidate"
+    set +e; "$candidate" --help >/dev/null 2>&1; probe_status=$?; set -e
+    ((probe_status != 126 && probe_status != 127)) || die "Snell 二进制无法在当前系统运行；Alpine/musl 通常需要 glibc 兼容层。"
     atomic_binary_install "$candidate" "$SNELL_BIN"
     rm -rf "$tmpdir"
 }
 
 configure_snell() {
-    local protocol="${1:-}" instance="${2:-}" port psk bind listen tfo dns config meta ipv6 obfs obfs_host dns_pref mode service
+    local protocol="${1:-}" instance="${2:-}" port psk bind listen tfo dns config config_tmp meta ipv6 obfs obfs_host dns_pref mode service
     migrate_proxy_legacy snell
     [[ -n "$instance" ]] || { show_existing_instances snell; read -r -p '实例编号（1-99）: ' instance; }
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     [[ ! -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 已存在。"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$SNELL_ROOT/instances" "$(snell_instance_dir "$instance")"
     config="$(snell_instance_dir "$instance")/snell.conf"; meta="$(snell_instance_dir "$instance")/meta"
+    new_temp_file config_tmp
     if [[ -z "$protocol" ]]; then
         protocol="$(select_snell_protocol 5)"
     fi
@@ -727,11 +834,13 @@ configure_snell() {
     tfo="$(select_boolean 'TCP Fast Open' true)"
     dns="$(prompt_default 'DNS（逗号分隔）' '1.1.1.1,8.8.8.8')"; valid_dns "$dns" || die "DNS 格式无效。"
     if [[ "$protocol" == 6 ]]; then
-        bind=dual; listen="0.0.0.0:${port},[::]:${port}"
+        if ipv6_available; then bind=dual; listen="0.0.0.0:${port},[::]:${port}"
+        else bind="0.0.0.0"; listen="${bind}:${port}"; warn "未检测到可用的全局 IPv6，Snell v6 将仅监听 IPv4。"; fi
         dns_pref="$(select_dns_preference)"
+        [[ "$dns_pref" != ipv6-only || "$bind" == dual ]] || die "当前系统没有可用 IPv6，不能选择 ipv6-only。"
         mode="$(select_snell_mode)"
         [[ "$mode" != unsafe-raw ]] || warn "unsafe-raw 会降低流量整形保护，仅在明确了解风险时使用。"
-        cat >"$config" <<EOF
+        cat >"$config_tmp" <<EOF
 [snell-server]
 listen = ${listen}
 psk = ${psk}
@@ -747,7 +856,7 @@ EOF
         obfs="$(select_snell_obfs)"
         obfs_host=""
         if [[ "$obfs" == http ]]; then obfs_host="$(prompt_default 'OBFS 域名' 'www.bing.com')"; valid_host "$obfs_host" || die "OBFS 域名无效。"; fi
-        cat >"$config" <<EOF
+        cat >"$config_tmp" <<EOF
 [snell-server]
 listen = ${listen}
 ipv6 = ${ipv6}
@@ -759,19 +868,20 @@ dns = ${dns}
 version = 5
 EOF
     fi
-    chown root:"$SERVICE_USER" "$config"; chmod 0640 "$config"
+    install -m 0640 -o root -g "$SERVICE_USER" "$config_tmp" "$config"; rm -f "$config_tmp"
     write_meta "$meta" "VERSION=${SNELL_VERSION:-unknown}" "PROTOCOL=$protocol" "PORT=$port" "BIND=$bind"
-    if [[ "$tfo" == true ]]; then
-        printf 'net.ipv4.tcp_fastopen = 3\n' >/etc/sysctl.d/99-newworld-snell.conf
-        sysctl -p /etc/sysctl.d/99-newworld-snell.conf >/dev/null || warn "内核未接受 TCP Fast Open 参数。"
-    else rm -f /etc/sysctl.d/99-newworld-snell.conf; fi
+    refresh_snell_tfo_sysctl
     service="$(snell_service "$instance")"
     write_service "$service" "NewWorld Snell Instance $instance" "$SNELL_BIN -c $config"
-    reload_start "$service"
+    if ! reload_start "$service"; then
+        systemctl disable --now "$service" >/dev/null 2>&1 || true
+        rm -f "$SYSTEMD_DIR/$service"; rm -rf "$(snell_instance_dir "$instance")"; systemctl daemon-reload
+        die "Snell 实例 $instance 启动失败，已清理未完成安装。"
+    fi
     firewall_open "$port" tcp
     [[ "$protocol" != 5 ]] || firewall_open "$port" udp
     local surge_config
-    surge_config="$(hostname) = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
+    surge_config="$(hostname)-Snell-${instance} = snell, $(public_ip), ${port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
     [[ "$protocol" == 6 && "$mode" != default ]] && surge_config+=", mode=${mode}"
     [[ "$protocol" == 5 && "$obfs" == http ]] && surge_config+=", obfs=http, obfs-host=${obfs_host}"
     print_config_block "Snell 客户端配置（实例 ${instance}，Surge [Proxy]）" "$surge_config"
@@ -779,15 +889,24 @@ EOF
 }
 
 install_snell() {
-    local target_protocol instance meta port bind current_protocol updated=0 detected_protocol=""
+    local target_protocol instance meta port bind current_protocol updated=0 detected_protocol="" instances
+    local -a services=()
     migrate_proxy_legacy snell
-    show_existing_instances snell
-    read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
+    instances="$(proxy_instance_dirs snell)"
+    if [[ "$UPDATE_ONLY" == true ]]; then
+        [[ -n "$instances" ]] || die "尚未安装 Snell 实例，无法执行更新。"
+        instance=""
+    elif [[ -z "$instances" ]]; then
+        read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"
+    else
+        show_existing_instances snell
+        read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
+    fi
     if [[ -z "$instance" ]]; then
         while read -r instance; do
             [[ -z "$instance" ]] && continue
             meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
-            [[ -z "$detected_protocol" || "$detected_protocol" == "$current_protocol" ]] || die "检测到 Snell v5 与 v6 混合实例；请按实例编号分别更新。"
+            [[ -z "$detected_protocol" || "$detected_protocol" == "$current_protocol" ]] || die "检测到 Snell v5 与 v6 混合实例；共享二进制无法安全批量更新，请先统一协议配置。"
             detected_protocol="$current_protocol"
         done < <(proxy_instance_dirs snell)
         [[ -n "$detected_protocol" ]] || die "没有可更新的 Snell 实例。"
@@ -802,9 +921,14 @@ install_snell() {
         [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
         while read -r instance; do
             [[ -z "$instance" ]] && continue
+            services+=("$(snell_service "$instance")")
+        done < <(proxy_instance_dirs snell)
+        restart_services_or_rollback "$SNELL_BIN" "${services[@]}"
+        updated=0
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
             meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
             port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
-            restart_or_rollback "$(snell_service "$instance")" "$SNELL_BIN"
             write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
             updated=$((updated + 1))
         done < <(proxy_instance_dirs snell)
@@ -812,23 +936,25 @@ install_snell() {
         return
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
-    target_protocol="$(select_snell_protocol 5)"
-    SNELL_CHECK_ONLY=true install_snell_binary "$target_protocol"
-    if [[ -d "$(snell_instance_dir "$instance")" ]] && [[ "$(read_meta "$(snell_instance_dir "$instance")/meta" VERSION)" == "$SNELL_VERSION" ]]; then
-        ok "Snell 实例 $instance 已是最新版本：$SNELL_VERSION（无需更新）。"; return
-    fi
-    install_snell_binary "$target_protocol"
-    [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
-    if [[ -d "$(snell_instance_dir "$instance")" ]]; then
-        meta="$(snell_instance_dir "$instance")/meta"; current_protocol="$(read_meta "$meta" PROTOCOL)"
-        [[ "$current_protocol" == "$target_protocol" ]] || die "Instance $instance protocol differs; reconfigure it to change protocol."
-        port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
-        restart_or_rollback "$(snell_service "$instance")" "$SNELL_BIN"
-        write_meta "$meta" "VERSION=$SNELL_VERSION" "PROTOCOL=$current_protocol" "PORT=$port" "BIND=$bind"
-        ok "Snell 实例 ${instance} 已更新到 ${SNELL_VERSION}。"
+    [[ ! -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 已存在；直接回车可更新全部现有实例。"
+    detected_protocol="$(snell_installed_protocol)"
+    if [[ -n "$detected_protocol" ]]; then
+        target_protocol="$detected_protocol"
+        info "新实例将沿用现有 Snell v${target_protocol} 协议。"
     else
-        configure_snell "$target_protocol" "$instance"
+        target_protocol="$(select_snell_protocol 5)"
     fi
+    SNELL_CHECK_ONLY=true install_snell_binary "$target_protocol"
+    if [[ -x "$SNELL_BIN" && -n "$instances" ]] && [[ "$(read_meta "$(snell_instance_dir "${instances%%$'\n'*}")/meta" VERSION)" == "$SNELL_VERSION" ]]; then
+        info "Snell 二进制已是最新版：${SNELL_VERSION}，直接创建新实例。"
+    else
+        install_snell_binary "$target_protocol"
+        while read -r current_protocol; do [[ -z "$current_protocol" ]] || services+=("$(snell_service "$current_protocol")"); done < <(proxy_instance_dirs snell)
+        restart_services_or_rollback "$SNELL_BIN" "${services[@]}"
+        sync_snell_meta_versions
+    fi
+    [[ ! "$SNELL_VERSION" =~ [A-Za-z] ]] || warn "Snell $SNELL_VERSION 是官方预发布版本。"
+    configure_snell "$target_protocol" "$instance"
 }
 
 ss_asset_pattern() {
@@ -855,36 +981,51 @@ install_ss_binary() {
 }
 
 configure_ss() {
-    local instance="${1:-}" port password method bind config meta service
+    local instance="${1:-}" port password method bind config config_tmp meta service
     migrate_proxy_legacy ss2022
     [[ -n "$instance" ]] || { show_existing_instances ss2022; read -r -p '实例编号（1-99）: ' instance; }
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
-    [[ ! -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 instance $instance already exists."
+    [[ ! -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 实例 $instance 已存在。"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$SS_ROOT/instances" "$(ss_instance_dir "$instance")"
     config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"
+    new_temp_file config_tmp
     port="$(prompt_default '监听端口' "$(random_port)")"; valid_port "$port" || die "端口无效。"
     port_unused "$port" || die "端口 $port 已被占用。"
     method="$(prompt_default '加密方式' '2022-blake3-aes-256-gcm')"
     case "$method" in 2022-blake3-aes-128-gcm) password="$(random_base64 16)";; 2022-blake3-aes-256-gcm) password="$(random_base64 32)";; *) die "仅允许标准 SS-2022 AES 方法。";; esac
     bind="0.0.0.0"
     jq -n --arg server "$bind" --argjson port "$port" --arg password "$password" --arg method "$method" \
-        '{server:$server,server_port:$port,password:$password,method:$method,mode:"tcp_and_udp"}' >"$config"
-    chown root:"$SERVICE_USER" "$config"; chmod 0640 "$config"
+        '{server:$server,server_port:$port,password:$password,method:$method,mode:"tcp_and_udp"}' >"$config_tmp"
+    install -m 0640 -o root -g "$SERVICE_USER" "$config_tmp" "$config"; rm -f "$config_tmp"
     write_meta "$meta" "VERSION=${SS_VERSION:-unknown}" "PORT=$port" "BIND=$bind"
     service="$(ss_service "$instance")"
     write_service "$service" "NewWorld SS-2022 Instance $instance" "$SS_BIN -c $config"
-    reload_start "$service"; firewall_open "$port" tcp; firewall_open "$port" udp
+    if ! reload_start "$service"; then
+        systemctl disable --now "$service" >/dev/null 2>&1 || true
+        rm -f "$SYSTEMD_DIR/$service"; rm -rf "$(ss_instance_dir "$instance")"; systemctl daemon-reload
+        die "SS-2022 实例 $instance 启动失败，已清理未完成安装。"
+    fi
+    firewall_open "$port" tcp; firewall_open "$port" udp
     local ss_url
-    ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
-    print_config_block 'SS-2022 客户端链接' "$ss_url"
-    print_config_block 'SS-2022 服务器配置' "$(cat "$config")"
+    ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022-${instance}"
+    print_config_block "SS-2022 客户端链接（实例 ${instance}）" "$ss_url"
+    print_config_block "SS-2022 服务器配置（实例 ${instance}）" "$(cat "$config")"
 }
 
 install_ss() {
-    local instance meta port bind updated=0
+    local instance meta port bind updated=0 instances current
+    local -a services=()
     migrate_proxy_legacy ss2022
-    show_existing_instances ss2022
-    read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
+    instances="$(proxy_instance_dirs ss2022)"
+    if [[ "$UPDATE_ONLY" == true ]]; then
+        [[ -n "$instances" ]] || die "尚未安装 SS-2022 实例，无法执行更新。"
+        instance=""
+    elif [[ -z "$instances" ]]; then
+        read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"
+    else
+        show_existing_instances ss2022
+        read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
+    fi
     RELEASE_CHECK_ONLY=true download_github_release shadowsocks/shadowsocks-rust "$(ss_asset_pattern)" /dev/null
     SS_VERSION="$DOWNLOADED_VERSION"
     if [[ -z "$instance" ]]; then
@@ -892,10 +1033,13 @@ install_ss() {
         while read -r instance; do [[ -z "$instance" ]] || [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" != "$SS_VERSION" ]] && updated=$((updated + 1)); done < <(proxy_instance_dirs ss2022)
         ((updated > 0)) || { ok "SS-2022 已是最新版本：$SS_VERSION（无需更新）。"; return; }
         install_ss_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(ss_service "$current")"); done < <(proxy_instance_dirs ss2022)
+        restart_services_or_rollback "$SS_BIN" "${services[@]}"
+        sync_ss_meta_versions
+        updated=0
         while read -r instance; do
             [[ -z "$instance" ]] && continue
             meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
-            restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
             write_meta "$meta" "VERSION=$SS_VERSION" "PORT=$port" "BIND=$bind"
             firewall_open "$port" tcp; firewall_open "$port" udp; updated=$((updated + 1))
         done < <(proxy_instance_dirs ss2022)
@@ -904,17 +1048,16 @@ install_ss() {
         return
     fi
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
-    if [[ -d "$(ss_instance_dir "$instance")" ]] && [[ "$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)" == "$SS_VERSION" ]]; then
-        ok "SS-2022 实例 $instance 已是最新版本：$SS_VERSION（无需更新）。"; return
+    [[ ! -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 实例 $instance 已存在；直接回车可更新全部现有实例。"
+    if [[ -x "$SS_BIN" && -n "$instances" ]] && [[ "$(read_meta "$(ss_instance_dir "${instances%%$'\n'*}")/meta" VERSION)" == "$SS_VERSION" ]]; then
+        info "SS-2022 二进制已是最新版：${SS_VERSION}，直接创建新实例。"
+    else
+        install_ss_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(ss_service "$current")"); done < <(proxy_instance_dirs ss2022)
+        restart_services_or_rollback "$SS_BIN" "${services[@]}"
+        sync_ss_meta_versions
     fi
-    install_ss_binary
-    if [[ -d "$(ss_instance_dir "$instance")" ]]; then
-        meta="$(ss_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"; bind="$(read_meta "$meta" BIND)"
-        restart_or_rollback "$(ss_service "$instance")" "$SS_BIN"
-        write_meta "$meta" "VERSION=$SS_VERSION" "PORT=$port" "BIND=$bind"
-        firewall_open "$port" tcp; firewall_open "$port" udp
-        ok "shadowsocks-rust 已更新到 ${SS_VERSION}。"
-    else configure_ss "$instance"; fi
+    configure_ss "$instance"
 }
 
 stls_asset_pattern() {
@@ -945,7 +1088,8 @@ set_backend_bind() {
             port="$(read_meta "$meta" PORT)"
             protocol="$(read_meta "$meta" PROTOCOL 2>/dev/null || printf 5)"
             if [[ "$bind" == dual ]]; then listen="0.0.0.0:${port},[::]:${port}"; else listen="${bind}:${port}"; fi
-            sed -Ei "s|^listen[[:space:]]*=.*|listen = ${listen}|" "$config"
+            new_temp_file tmp; sed -E "s|^listen[[:space:]]*=.*|listen = ${listen}|" "$config" >"$tmp"
+            install -m 0640 -o root -g "$SERVICE_USER" "$tmp" "$config"; rm -f "$tmp"
             write_meta "$meta" "VERSION=$(read_meta "$meta" VERSION)" "PROTOCOL=$protocol" "PORT=$port" "BIND=$bind"
             systemctl restart "$service" ;;
         ss2022)
@@ -961,7 +1105,7 @@ set_backend_bind() {
 configure_stls() {
     local instance="${1:-}" target backend_instance backend_dir listen_port backend_port previous_bind tls_host password env meta backend_protocol service first_for_backend=false
     shadowtls_migrate_legacy
-    [[ -n "$instance" ]] || { show_existing_instances shadowtls; read -r -p '实例编号（1-99）: ' instance; }
+    [[ -n "$instance" ]] || { show_existing_instances shadowtls; read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"; }
     valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
     [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "实例 $instance 已存在；请先卸载该实例，或使用更新功能。"
     printf '后端：1) Snell  2) ss-2022\n'; read -r -p '请选择 [1-2]: ' target
@@ -992,26 +1136,51 @@ configure_stls() {
     service="$(shadowtls_service "$instance")"
     write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" \
         "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
-    reload_start "$service"; firewall_open "$listen_port" tcp
+    if ! reload_start "$service"; then
+        systemctl disable --now "$service" >/dev/null 2>&1 || true
+        rm -f "$SYSTEMD_DIR/$service"; rm -rf "$(shadowtls_instance_dir "$instance")"; systemctl daemon-reload
+        if [[ "$first_for_backend" == true ]]; then
+            set_backend_bind "$target" "$backend_instance" "$previous_bind" || true
+            firewall_open "$backend_port" tcp
+            if [[ "$target" == ss2022 || "$backend_protocol" == 5 ]]; then firewall_open "$backend_port" udp; fi
+        fi
+        die "ShadowTLS 实例 $instance 启动失败，已恢复后端并清理未完成安装。"
+    fi
+    firewall_open "$listen_port" tcp
     print_config_block "ShadowTLS v3 完整服务器配置（实例 ${instance}）" "地址 = $(public_ip)
 $(cat "$env")
-后端 = ${target} (127.0.0.1:${backend_port})"
+后端 = ${target} #${backend_instance} (127.0.0.1:${backend_port})"
     show_config "$target" "$backend_instance"
 }
 
 install_stls() {
-    local instance meta port updated=0
+    local instance meta port updated=0 instances current
+    local -a services=()
     shadowtls_migrate_legacy
-    if [[ -n "$(shadowtls_instance_dirs)" ]]; then
+    instances="$(shadowtls_instance_dirs)"
+    if [[ "$UPDATE_ONLY" == true ]]; then
+        [[ -n "$instances" ]] || die "尚未安装 ShadowTLS 实例，无法执行更新。"
+        instance=""
+    elif [[ -n "$instances" ]]; then
         show_existing_instances shadowtls
         read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
         if [[ -n "$instance" ]]; then
             valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
             [[ ! -d "$(shadowtls_instance_dir "$instance")" ]] || die "ShadowTLS 实例 $instance 已存在；直接回车可更新全部实例。"
-            install_stls_binary; configure_stls "$instance"; return
+            RELEASE_CHECK_ONLY=true download_github_release ihciah/shadow-tls "$(stls_asset_pattern)" /dev/null
+            STLS_VERSION="$DOWNLOADED_VERSION"
+            if [[ -x "$STLS_BIN" ]] && [[ "$(read_meta "$(shadowtls_instance_dir "${instances%%$'\n'*}")/meta" VERSION)" == "$STLS_VERSION" ]]; then
+                info "ShadowTLS 二进制已是最新版：${STLS_VERSION}，直接创建新实例。"
+            else
+                install_stls_binary
+                while read -r current; do [[ -z "$current" ]] || services+=("$(shadowtls_service "$current")"); done < <(shadowtls_instance_dirs)
+                restart_services_or_rollback "$STLS_BIN" "${services[@]}"
+                sync_stls_meta_versions
+            fi
+            configure_stls "$instance"; return
         fi
     fi
-    if [[ -n "$(shadowtls_instance_dirs)" ]]; then
+    if [[ -n "$instances" ]]; then
         RELEASE_CHECK_ONLY=true download_github_release ihciah/shadow-tls "$(stls_asset_pattern)" /dev/null
         STLS_VERSION="$DOWNLOADED_VERSION"
         while read -r instance; do
@@ -1019,28 +1188,36 @@ install_stls() {
         done < <(shadowtls_instance_dirs)
         ((updated > 0)) || { ok "ShadowTLS 已是最新版本：$STLS_VERSION（无需更新）。"; return; }
         install_stls_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(shadowtls_service "$current")"); done < <(shadowtls_instance_dirs)
+        restart_services_or_rollback "$STLS_BIN" "${services[@]}"
         while read -r instance; do
             [[ -z "$instance" ]] && continue
             meta="$(shadowtls_instance_dir "$instance")/meta"; port="$(read_meta "$meta" PORT)"
-            restart_or_rollback "$(shadowtls_service "$instance")" "$STLS_BIN"
             write_meta "$meta" "VERSION=$STLS_VERSION" "TARGET=$(read_meta "$meta" TARGET)" "TARGET_INSTANCE=$(read_meta "$meta" TARGET_INSTANCE 2>/dev/null || printf 1)" "PORT=$port" \
                 "BACKEND_PORT=$(read_meta "$meta" BACKEND_PORT)" "PREVIOUS_BIND=$(read_meta "$meta" PREVIOUS_BIND)"
             firewall_open "$port" tcp
         done < <(shadowtls_instance_dirs)
         ok "已更新全部 ShadowTLS 实例到 ${STLS_VERSION}。"
-    else install_stls_binary; configure_stls; fi
+    else
+        read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"
+        valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+        install_stls_binary; configure_stls "$instance"
+    fi
 }
 
 enable_bbr() {
-    local available
+    local available config="/etc/sysctl.d/99-newworld-bbr.conf"
     modprobe tcp_bbr 2>/dev/null || true
     available="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
     grep -qw bbr <<<"$available" || die "当前内核不支持 BBR，请升级到支持 BBR 的发行版内核。"
-    cat >"/etc/sysctl.d/99-newworld-bbr.conf" <<'EOF'
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-EOF
-    sysctl --system >/dev/null
+    : >"$config"
+    if sysctl -n net.core.default_qdisc >/dev/null 2>&1; then
+        printf 'net.core.default_qdisc = fq\n' >>"$config"
+    else
+        warn "当前内核或容器未暴露 net.core.default_qdisc，跳过 qdisc 设置。"
+    fi
+    printf 'net.ipv4.tcp_congestion_control = bbr\n' >>"$config"
+    sysctl -p "$config" >/dev/null || die "BBR 参数无法应用；容器环境需要宿主机授权相关 sysctl。"
     [[ "$(sysctl -n net.ipv4.tcp_congestion_control)" == bbr ]] || die "BBR 未成功启用。"
     ok "BBR 已启用；未覆盖 /etc/sysctl.conf。"
 }
@@ -1048,33 +1225,36 @@ EOF
 disable_bbr() {
     rm -f /etc/sysctl.d/99-newworld-bbr.conf
     if sysctl -n net.ipv4.tcp_available_congestion_control | grep -qw cubic; then
-        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null
+        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || warn "无法立即切换为 cubic，重启后将不再应用本工具的 BBR 配置。"
     fi
-    sysctl --system >/dev/null; ok "已移除本工具的 BBR 配置。"
+    ok "已移除本工具的 BBR 配置。"
 }
 
 remove_component() {
-    local component="$1" target previous target_instance port protocol instance instance_dir
-    confirm "确定卸载 $component 及其配置？" || { warn "已取消。"; return 0; }
+    local component="$1" target previous target_instance port protocol instance instance_dir label
+    case "$component" in
+        snell) migrate_proxy_legacy snell; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"; label="Snell #$instance" ;;
+        ss|ss2022) migrate_proxy_legacy ss2022; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; label="SS-2022 #$instance" ;;
+        shadowtls) shadowtls_migrate_legacy; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; label="ShadowTLS #$instance" ;;
+        bbr) label=BBR ;;
+        *) die "未知组件：$component" ;;
+    esac
+    confirm "确定卸载 ${label} 及其配置？" || { warn "已取消。"; return 0; }
     case "$component" in
         snell)
-            migrate_proxy_legacy snell; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"
             shadowtls_target_active snell "$instance" && die "该 Snell 实例仍被 ShadowTLS 使用。"
             instance_dir="$(snell_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
             port="$(read_meta "$instance_dir/meta" PORT)"; protocol="$(read_meta "$instance_dir/meta" PROTOCOL 2>/dev/null || printf 5)"
             systemctl disable --now "$(snell_service "$instance")" >/dev/null 2>&1 || true; firewall_close "$port" tcp; [[ "$protocol" != 5 ]] || firewall_close "$port" udp
-            rm -f "$SYSTEMD_DIR/$(snell_service "$instance")"; rm -rf "$instance_dir"
+            rm -f "$SYSTEMD_DIR/$(snell_service "$instance")"; rm -rf "$instance_dir"; refresh_snell_tfo_sysctl
             [[ -n "$(proxy_instance_dirs snell)" ]] || { rm -f "$SNELL_BIN" "${SNELL_BIN}.previous" /etc/sysctl.d/99-newworld-snell.conf; rm -rf "$SNELL_ROOT"; } ;;
         ss|ss2022)
-            migrate_proxy_legacy ss2022; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"
             shadowtls_target_active ss2022 "$instance" && die "该 SS-2022 实例仍被 ShadowTLS 使用。"
             instance_dir="$(ss_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
             port="$(read_meta "$instance_dir/meta" PORT)"; systemctl disable --now "$(ss_service "$instance")" >/dev/null 2>&1 || true
             firewall_close "$port" tcp; firewall_close "$port" udp; rm -f "$SYSTEMD_DIR/$(ss_service "$instance")"; rm -rf "$instance_dir"
             [[ -n "$(proxy_instance_dirs ss2022)" ]] || { rm -f "$SS_BIN" "${SS_BIN}.previous"; rm -rf "$SS_ROOT"; } ;;
         shadowtls)
-            shadowtls_migrate_legacy
-            instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"
             valid_instance_id "$instance" || die "实例编号无效。"
             instance_dir="$(shadowtls_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
             target="$(read_meta "$instance_dir/meta" TARGET)"; previous="$(read_meta "$instance_dir/meta" PREVIOUS_BIND)"; target_instance="$(read_meta "$instance_dir/meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
@@ -1089,7 +1269,6 @@ remove_component() {
             fi
             if [[ -z "$(shadowtls_instance_dirs)" ]]; then rm -f "$STLS_BIN" "${STLS_BIN}.previous"; rm -rf "$STLS_ROOT"; fi ;;
         bbr) disable_bbr; return 0 ;;
-        *) die "未知组件：$component" ;;
     esac
     systemctl daemon-reload; systemctl reset-failed >/dev/null 2>&1 || true
     ok "$component 已卸载。"
@@ -1098,9 +1277,15 @@ remove_component() {
 component_service() {
     local component="$1" instance="${2:-}"
     case "$component" in
-        snell) [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"; snell_service "$instance" ;;
-        ss|ss2022) [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; ss_service "$instance" ;;
-        shadowtls) [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; shadowtls_service "$instance" ;;
+        snell)
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"; valid_instance_id "$instance" && [[ -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 不存在。"
+            snell_service "$instance" ;;
+        ss|ss2022)
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; valid_instance_id "$instance" && [[ -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 实例 $instance 不存在。"
+            ss_service "$instance" ;;
+        shadowtls)
+            [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; valid_instance_id "$instance" && [[ -d "$(shadowtls_instance_dir "$instance")" ]] || die "ShadowTLS 实例 $instance 不存在。"
+            shadowtls_service "$instance" ;;
         *) return 1 ;;
     esac
 }
@@ -1143,18 +1328,22 @@ show_status() {
 }
 
 show_config() {
-    local component="$1" requested_instance="${2:-}" instance config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
+    local component="$1" requested_instance="${2:-}" routed_stls="${3:-}" instance instances wrappers config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
     require_root
+    [[ -n "$PUBLIC_IP_CACHE" ]] || PUBLIC_IP_CACHE="$(public_ip)"
     if [[ -z "$requested_instance" ]]; then
         case "$component" in
             snell)
-                while read -r instance; do [[ -z "$instance" ]] || show_config snell "$instance"; done < <(proxy_instance_dirs snell)
+                instances="$(proxy_instance_dirs snell)"; [[ -n "$instances" ]] || die "未安装 Snell 实例。"
+                while read -r instance; do [[ -z "$instance" ]] || show_config snell "$instance"; done <<<"$instances"
                 return ;;
             ss|ss2022)
-                while read -r instance; do [[ -z "$instance" ]] || show_config ss2022 "$instance"; done < <(proxy_instance_dirs ss2022)
+                instances="$(proxy_instance_dirs ss2022)"; [[ -n "$instances" ]] || die "未安装 SS-2022 实例。"
+                while read -r instance; do [[ -z "$instance" ]] || show_config ss2022 "$instance"; done <<<"$instances"
                 return ;;
             shadowtls)
-                while read -r instance; do [[ -z "$instance" ]] || show_config shadowtls "$instance"; done < <(shadowtls_instance_dirs)
+                instances="$(shadowtls_instance_dirs)"; [[ -n "$instances" ]] || die "未安装 ShadowTLS 实例。"
+                while read -r instance; do [[ -z "$instance" ]] || show_config shadowtls "$instance"; done <<<"$instances"
                 return ;;
         esac
     fi
@@ -1169,85 +1358,82 @@ show_config() {
             mode="$(sed -nE 's/^mode[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             obfs="$(sed -nE 's/^obfs[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
             obfs_host="$(sed -nE 's/^obfs-host[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config")"
-            external_port="$port"
-            if shadowtls_target_active snell "$instance"; then
-                target="$(shadowtls_first_instance_for_target snell "$instance")"
-                external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
-                stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
-            else stls_options=""; fi
-            client_config="$(hostname) = snell, $(public_ip), ${external_port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
-            [[ "$protocol" != 6 || "$mode" == default || -z "$mode" ]] || client_config+=", mode=${mode}"
-            [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
-            [[ -z "$stls_options" ]] || client_config+=", ${stls_options}"
-            print_config_block "Snell 客户端配置（Surge [Proxy]${stls_options:+，经 ShadowTLS v3}）" "$client_config"
+            wrappers="${routed_stls:-$(shadowtls_instances_for_target snell "$instance")}"
+            if [[ -n "$wrappers" ]]; then
+                while read -r target; do
+                    [[ -z "$target" ]] && continue
+                    external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
+                    stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
+                    client_config="$(hostname)-Snell-${instance}-STLS-${target} = snell, $(public_ip), ${external_port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
+                    [[ "$protocol" != 6 || "$mode" == default || -z "$mode" ]] || client_config+=", mode=${mode}"
+                    [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
+                    client_config+=", ${stls_options}"
+                    print_config_block "Snell 客户端配置（实例 ${instance}，经 ShadowTLS #${target}）" "$client_config"
+                done <<<"$wrappers"
+            else
+                external_port="$port"; stls_options=""
+                client_config="$(hostname)-Snell-${instance} = snell, $(public_ip), ${external_port}, psk=${psk}, version=${protocol}, tfo=${tfo}, reuse=true, ecn=true"
+                [[ "$protocol" != 6 || "$mode" == default || -z "$mode" ]] || client_config+=", mode=${mode}"
+                [[ "$obfs" != http ]] || client_config+=", obfs=http, obfs-host=${obfs_host}"
+                print_config_block "Snell 客户端配置（实例 ${instance}，Surge [Proxy]）" "$client_config"
+            fi
             print_config_block "Snell 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
         ss|ss2022)
             instance="$requested_instance"
             config="$(ss_instance_dir "$instance")/config.json"; meta="$(ss_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "未安装。"
             method="$(jq -er '.method' "$config")"; password="$(jq -er '.password' "$config")"; port="$(jq -er '.server_port' "$config")"
-            external_port="$port"
-            if shadowtls_target_active ss2022 "$instance"; then
-                target="$(shadowtls_first_instance_for_target ss2022 "$instance")"
-                external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
-                stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
-                client_config="$(hostname) = ss, $(public_ip), ${external_port}, encrypt-method=${method}, password=${password}, ${stls_options}"
-                print_config_block 'SS-2022 客户端配置（Surge [Proxy]，经 ShadowTLS v3）' "$client_config"
+            wrappers="${routed_stls:-$(shadowtls_instances_for_target ss2022 "$instance")}"
+            if [[ -n "$wrappers" ]]; then
+                while read -r target; do
+                    [[ -z "$target" ]] && continue
+                    external_port="$(read_meta "$(shadowtls_instance_dir "$target")/meta" PORT)"
+                    stls_options="$(shadowtls_surge_options "$(shadowtls_instance_dir "$target")")"
+                    client_config="$(hostname)-SS2022-${instance}-STLS-${target} = ss, $(public_ip), ${external_port}, encrypt-method=${method}, password=${password}, ${stls_options}"
+                    print_config_block "SS-2022 客户端配置（实例 ${instance}，经 ShadowTLS #${target}）" "$client_config"
+                done <<<"$wrappers"
             else
-                ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022"
-                print_config_block 'SS-2022 客户端链接' "$ss_url"
+                ss_url="ss://$(printf '%s' "${method}:${password}" | base64url)@$(public_ip):${port}#NewWorld-SS2022-${instance}"
+                print_config_block "SS-2022 客户端链接（实例 ${instance}）" "$ss_url"
             fi
-            print_config_block 'SS-2022 服务器配置' "$(jq . "$config")" ;;
+            print_config_block "SS-2022 服务器配置（实例 ${instance}）" "$(jq . "$config")" ;;
         shadowtls)
             shadowtls_migrate_legacy
             target="$requested_instance"
             config="$(shadowtls_instance_dir "$target")/environment"; [[ -f "$config" ]] || die "实例不存在。"
             print_config_block "ShadowTLS v3 完整服务器配置（实例 ${target}）" "地址 = $(public_ip)
 $(cat "$config")
-后端 = $(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET 2>/dev/null || printf unknown) (127.0.0.1:$(read_meta "$(shadowtls_instance_dir "$target")/meta" BACKEND_PORT 2>/dev/null || printf unknown))"
-            show_config "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET)" "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)" ;;
+后端 = $(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET 2>/dev/null || printf unknown) #$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1) (127.0.0.1:$(read_meta "$(shadowtls_instance_dir "$target")/meta" BACKEND_PORT 2>/dev/null || printf unknown))"
+            show_config "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET)" "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)" "$target" ;;
         *) die "未知组件。" ;;
     esac
 }
 
 reconfigure_component() {
-    local component="$1" snapshot instance version protocol
+    local component="$1" snapshot instance version protocol binary snapshot_binary
     case "$component" in
         snell)
             instance="$(select_proxy_instance snell)"; shadowtls_target_active snell "$instance" && die "该实例正在被 ShadowTLS 使用。"
             version="$(read_meta "$(snell_instance_dir "$instance")/meta" VERSION)"; protocol="$(read_meta "$(snell_instance_dir "$instance")/meta" PROTOCOL)"
-            YES=true; remove_component snell "$instance"; SNELL_VERSION="$version"; configure_snell "$protocol" "$instance"; return ;;
+            binary="$SNELL_BIN" ;;
         ss|ss2022)
             instance="$(select_proxy_instance ss2022)"; shadowtls_target_active ss2022 "$instance" && die "该实例正在被 ShadowTLS 使用。"
             version="$(read_meta "$(ss_instance_dir "$instance")/meta" VERSION)"
-            YES=true; remove_component ss2022 "$instance"; SS_VERSION="$version"; configure_ss "$instance"; return ;;
-    esac
-    case "$component" in snell|ss|ss2022|shadowtls) ;; *) die "未知组件：$component" ;; esac
-    snapshot_manager_state snapshot
-    if (
-        local old_port target previous version protocol
-        case "$component" in
-        snell)
-            [[ -x "$SNELL_BIN" ]] || die "Snell 未安装。"
-            shadowtls_target_active snell && die "仍有 ShadowTLS 实例正在使用 Snell；重配前请先卸载对应实例。"
-            version="$(read_meta "$ROOT_DIR/snell/meta" VERSION)"
-            protocol="$(read_meta "$ROOT_DIR/snell/meta" PROTOCOL 2>/dev/null || printf 5)"
-            old_port="$(read_meta "$ROOT_DIR/snell/meta" PORT)"
-            systemctl stop "$SNELL_SERVICE"; firewall_close "$old_port" tcp
-            [[ "$protocol" != 5 ]] || firewall_close "$old_port" udp
-            SNELL_VERSION="$version"; configure_snell "$protocol" ;;
-        ss|ss2022)
-            [[ -x "$SS_BIN" ]] || die "ss-2022 未安装。"
-            version="$(read_meta "$ROOT_DIR/ss2022/meta" VERSION)"
-            old_port="$(read_meta "$ROOT_DIR/ss2022/meta" PORT)"
-            systemctl stop "$SS_SERVICE"; firewall_close "$old_port" tcp; firewall_close "$old_port" udp
-            SS_VERSION="$version"; configure_ss ;;
+            binary="$SS_BIN" ;;
         shadowtls)
-            [[ -x "$STLS_BIN" ]] || die "ShadowTLS 未安装。"
-            shadowtls_migrate_legacy
-            target="$(select_shadowtls_instance)"
-            version="$(read_meta "$(shadowtls_instance_dir "$target")/meta" VERSION)"
-            remove_component shadowtls "$target"
-            STLS_VERSION="$version"; configure_stls ;;
+            instance="$(select_shadowtls_instance)"; version="$(read_meta "$(shadowtls_instance_dir "$instance")/meta" VERSION)"
+            binary="$STLS_BIN" ;;
+        *) die "未知组件：$component" ;;
+    esac
+    snapshot_manager_state snapshot
+    snapshot_binary="$snapshot/bin/${binary##*/}"
+    if (
+        YES=true
+        remove_component "$component" "$instance"
+        [[ ! -f "$snapshot_binary" ]] || install -m 0755 -o root -g root "$snapshot_binary" "$binary"
+        case "$component" in
+            snell) SNELL_VERSION="$version"; configure_snell "$protocol" "$instance" ;;
+            ss|ss2022) SS_VERSION="$version"; configure_ss "$instance" ;;
+            shadowtls) STLS_VERSION="$version"; configure_stls "$instance" ;;
         esac
     ); then
         rm -rf -- "$snapshot"
@@ -1279,7 +1465,7 @@ install_manager() {
 }
 
 check_manager_update() {
-    local remote_script remote_version target="/usr/local/sbin/newworld-manager"
+    local remote_script remote_version target="/usr/local/sbin/newworld-manager" staged="/usr/local/sbin/.newworld-manager.new"
     ensure_dependencies self-install
     new_temp_file remote_script
     info "检查 NewWorld-Manager 更新。"
@@ -1288,7 +1474,7 @@ check_manager_update() {
     remote_version="$(sed -nE 's/^readonly VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' "$remote_script" | head -n1)"
     [[ -n "$remote_version" ]] || die "无法识别远端脚本版本。"
     if [[ "$remote_version" == "$VERSION" ]]; then
-        ok "当前已是最新版：$VERSION"
+        ok "当前已是最新版：${VERSION}"
         return 0
     fi
     if ! version_is_newer "$remote_version" "$VERSION"; then
@@ -1298,18 +1484,29 @@ check_manager_update() {
     info "发现新版本：${VERSION} → ${remote_version}"
     confirm "是否更新并安装 nw-manager ${remote_version}？" || { warn "已取消更新。"; return 0; }
     install -d -m 0755 /usr/local/sbin "$BIN_DIR"
-    install -m 0755 -o root -g root "$remote_script" "$target"
+    install -m 0755 -o root -g root "$remote_script" "$staged"
+    mv -f "$staged" "$target"
     ln -sfn "$target" "$BIN_DIR/nw-manager"
     ok "已更新到 ${remote_version}；下次运行 nw-manager 时生效。"
 }
 
 doctor() {
-    local failures=0 command
-    for command in bash curl jq systemctl ss tar unzip sha256sum; do
+    local failures=0 command os_name memory_limit="" reported="" commands=(bash curl systemctl ip ss)
+    [[ ! -x "$SNELL_BIN" ]] || commands+=(unzip openssl)
+    [[ ! -x "$SS_BIN" ]] || commands+=(jq tar xz sha256sum)
+    [[ ! -x "$STLS_BIN" ]] || commands+=(jq openssl sha256sum)
+    os_name="$(sed -nE 's/^PRETTY_NAME="?([^\"]*)"?$/\1/p' /etc/os-release 2>/dev/null | head -n1 || true)"
+    printf '系统：%s\n架构：%s\n包管理器：' "${os_name:-未知 Linux}" "$(uname -m)"
+    package_manager 2>/dev/null || printf '未支持'; printf '\n'
+    if [[ -r /sys/fs/cgroup/memory.max ]]; then memory_limit="$(</sys/fs/cgroup/memory.max)"; fi
+    [[ ! "$memory_limit" =~ ^[0-9]+$ ]] || printf '容器内存上限：%s MiB\n' "$((memory_limit / 1048576))"
+    for command in "${commands[@]}"; do
+        [[ " $reported " != *" $command "* ]] || continue; reported+=" $command"
         if have "$command"; then printf '%s✓%s %-12s %s\n' "$GREEN" "$RESET" "$command" "$(command -v "$command")"
         else printf '%s✗%s %-12s 缺失\n' "$RED" "$RESET" "$command"; failures=$((failures+1)); fi
     done
     [[ -d /run/systemd/system ]] || { warn "systemd 未运行。"; failures=$((failures+1)); }
+    [[ "$(id -u)" -eq 0 ]] || warn "当前不是 root，仅执行只读检查。"
     return "$failures"
 }
 
@@ -1345,7 +1542,7 @@ menu() {
         read -r -p '请选择 [0-11]: ' choice
         case "$choice" in
             1) install_component bbr;; 2) install_component snell;; 3) install_component ss2022;; 4) install_component shadowtls;;
-            5) component="$(select_component)"; [[ "$component" != ss2022 ]] || ensure_dependencies ss2022; show_config "$component";;
+            5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; esac; show_config "$component";;
             6) journalctl -u "$(select_component_service)" -n 100 --no-pager;;
             7) systemctl restart "$(select_component_service)";;
             8) component="$(select_component true)"; remove_component "$component";;
@@ -1364,22 +1561,29 @@ main() {
     set -- "${args[@]}"; command="${1:-menu}"; (($# == 0)) || shift
     require_linux
     case "$command" in
-        status) show_status;; doctor) doctor;; menu)
+        status) require_systemd; show_status;; doctor) doctor;; menu)
             require_root; require_systemd; ensure_service_user; make_layout; menu;;
-        install|update)
+        install)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"
             require_root; require_systemd; ensure_service_user; make_layout; install_component "$component";;
+        update)
+            component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"
+            [[ "$component" != bbr ]] || die "BBR 没有独立更新操作，请使用 install bbr 重新应用配置。"
+            UPDATE_ONLY=true; require_root; require_systemd; ensure_service_user; make_layout; install_component "$component";;
         remove)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"
             shift || true; require_root; require_systemd; ensure_service_user; make_layout; remove_component "$component" "${1:-}";;
         restart)
-            component="${1:-}"; shift || true; require_root
+            component="${1:-}"; shift || true; require_root; require_systemd
             service="$(component_service "$component" "${1:-}")" || die "未知组件。"
             systemctl restart "$service";;
         logs)
-            component="${1:-}"; lines="${2:-100}"; [[ "$lines" =~ ^[1-9][0-9]*$ ]] || die "日志行数无效。"
+            component="${1:-}"; lines="${2:-100}"; require_systemd; [[ "$lines" =~ ^[1-9][0-9]*$ ]] || die "日志行数无效。"
             service="$(component_service "$component" "${3:-}")" || die "未知组件。"; journalctl -u "$service" -n "$lines" --no-pager;;
-        config) component="${1:-}"; require_root; [[ "$component" != ss && "$component" != ss2022 ]] || ensure_dependencies ss2022; show_config "$component" "${2:-}";;
+        config)
+            component="${1:-}"; require_root
+            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; esac
+            show_config "$component" "${2:-}";;
         configure)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"
             require_root; require_systemd; ensure_dependencies "$component"; ensure_service_user; make_layout; reconfigure_component "$component";;

@@ -1,0 +1,20 @@
+name: Shell quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n newworld-manager.sh
+      - name: ShellCheck
+        run: shellcheck -S style newworld-manager.sh tests/smoke.sh
+      - name: Smoke tests
+        run: bash tests/smoke.sh
