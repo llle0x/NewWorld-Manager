@@ -1386,7 +1386,7 @@ upgrade_stls_listener() {
         write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" "$STLS_BIN --v3 server --listen \${LISTEN_ADDR} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
         systemctl daemon-reload
         if systemctl restart "$service" && systemctl is-active --quiet "$service"; then
-            [[ "$address" == \[::\]:* ]] && ok "ShadowTLS #$instance 已使用 IPv4/IPv6 双栈监听：$address" || warn "ShadowTLS #$instance 当前系统仅可使用 IPv4 监听：$address"
+            if [[ "$address" == \[::\]:* ]]; then ok "ShadowTLS #$instance 已使用 IPv4/IPv6 双栈监听：$address"; else warn "ShadowTLS #$instance 当前系统仅可使用 IPv4 监听：$address"; fi
         else
             cp -a "$old_env" "$env"; cp -a "$old_unit" "$SYSTEMD_DIR/$service"; systemctl daemon-reload; systemctl restart "$service" || true; warn "ShadowTLS #$instance 无法使用 $address，已恢复原监听。"
         fi
