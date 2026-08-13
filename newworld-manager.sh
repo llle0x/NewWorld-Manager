@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.2.4"
+readonly VERSION="5.2.5"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -533,7 +533,7 @@ verify_service_executable() {
 
 download() {
     local url="$1" output="$2"
-    curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-delay 1 \
+    curl --proto '=https' --tlsv1.2 -fL -A "$APP/$VERSION" --retry 3 --retry-delay 1 \
         --connect-timeout 10 --max-time 300 -o "$output" "$url"
 }
 
@@ -547,7 +547,7 @@ parse_sha256_file() {
 }
 
 download_github_release() {
-    local repo="$1" pattern="$2" output="$3" json url digest count asset_name sidecar_url="" sidecar="" expected="" token_config="" token_args=()
+    local repo="$1" pattern="$2" output="$3" json url digest count asset_name sidecar_url="" sidecar="" expected="" token_config="" code latest tag html href name token_args=()
     new_temp_file json
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         [[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]] || die "GITHUB_TOKEN 格式无效。"
@@ -555,8 +555,21 @@ download_github_release() {
         printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" >"$token_config"
         token_args=(--config "$token_config")
     fi
-    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "${token_args[@]}" \
-        "https://api.github.com/repos/$repo/releases/latest" -o "$json"
+    code="$(curl --proto '=https' --tlsv1.2 -sSL -A "$APP/$VERSION" --retry 3 "${token_args[@]}" \
+        -w '%{http_code}' "https://api.github.com/repos/$repo/releases/latest" -o "$json")"
+    if [[ "$code" != 200 ]]; then
+        warn "GitHub API 返回 HTTP $code，改用官方 Release 页面查询。"
+        latest="$(curl --proto '=https' --tlsv1.2 -fsSIL -A "$APP/$VERSION" --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")" || die "无法访问 $repo 的官方 Release 页面。"
+        tag="${latest##*/}"; valid_release_version "$tag" || die "无法识别 $repo 的最新版本。"
+        new_temp_file html
+        download "https://github.com/$repo/releases/expanded_assets/$tag" "$html"
+        jq -n --arg tag "$tag" '{tag_name:$tag,assets:[]}' >"$json"
+        while IFS= read -r href; do
+            href="${href#*href=\"}"; href="${href%%\"*}"; href="${href//&amp;/&}"; name="${href##*/}"
+            jq --arg name "$name" --arg url "https://github.com$href" '.assets += [{name:$name,browser_download_url:$url,digest:""}]' "$json" >"${json}.next"
+            mv -f "${json}.next" "$json"
+        done < <(grep -oE 'href="/[^\"]+/releases/download/[^\"]+"' "$html" || true)
+    fi
     DOWNLOADED_VERSION="$(jq -er '.tag_name' "$json")"
     valid_release_version "$DOWNLOADED_VERSION" || die "官方发布版本格式异常：$DOWNLOADED_VERSION"
     count="$(jq --arg re "$pattern" '[.assets[] | select(.name | test($re))] | length' "$json")"
