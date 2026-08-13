@@ -32,7 +32,7 @@ SS-2022 与 ShadowTLS 使用官方 musl 静态构建，V2Fly 和 Xray 也提供�
 打开交互菜单：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh)"
+curl -fsSL https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh | bash
 ```
 
 安装全局命令后使用：

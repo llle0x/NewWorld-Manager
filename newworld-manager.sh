@@ -724,37 +724,27 @@ write_service() {
 }
 
 repair_service_unit() {
-    local service="$1" instance instance_dir config env
+    local service="$1" instance kind instance_dir config binary description command env=""
     systemctl cat "$service" >/dev/null 2>&1 && return 0
     case "$service" in
         newworld-snell-*.service)
-            instance="${service#newworld-snell-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
-            instance_dir="$(snell_instance_dir "$instance")"; config="$instance_dir/snell.conf"
-            [[ -r "$config" && -r "$instance_dir/meta" && -x "$SNELL_BIN" ]] || die "Snell #$instance 配置残留不完整，无法自动恢复服务。"
-            write_service "$service" "NewWorld Snell Instance $instance" "$SNELL_BIN -c $config" ;;
+            instance="${service#newworld-snell-}"; kind=Snell; binary="$SNELL_BIN"; instance_dir="$(snell_instance_dir "${instance%.service}")"; config="$instance_dir/snell.conf"; command="$binary -c $config" ;;
         newworld-ss2022-*.service)
-            instance="${service#newworld-ss2022-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
-            instance_dir="$(ss_instance_dir "$instance")"; config="$instance_dir/config.json"
-            [[ -r "$config" && -r "$instance_dir/meta" && -x "$SS_BIN" ]] || die "SS-2022 #$instance 配置残留不完整，无法自动恢复服务。"
-            write_service "$service" "NewWorld SS-2022 Instance $instance" "$SS_BIN -c $config" ;;
+            instance="${service#newworld-ss2022-}"; kind=SS-2022; binary="$SS_BIN"; instance_dir="$(ss_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary -c $config" ;;
         newworld-shadowtls-*.service)
-            instance="${service#newworld-shadowtls-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
-            instance_dir="$(shadowtls_instance_dir "$instance")"; env="$instance_dir/environment"
-            [[ -r "$env" && -r "$instance_dir/meta" && -x "$STLS_BIN" ]] || die "ShadowTLS #$instance 配置残留不完整，无法自动恢复服务。"
-            write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" \
-                "$STLS_BIN --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env" ;;
+            instance="${service#newworld-shadowtls-}"; kind=ShadowTLS; binary="$STLS_BIN"; instance_dir="$(shadowtls_instance_dir "${instance%.service}")"; config="$instance_dir/environment"; env="$config"
+            command="$binary --v3 server --listen 0.0.0.0:\${LISTEN_PORT} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" ;;
         newworld-vmess-*.service)
-            instance="${service#newworld-vmess-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
-            instance_dir="$(vmess_instance_dir "$instance")"; config="$instance_dir/config.json"
-            [[ -r "$config" && -r "$instance_dir/meta" && -x "$V2RAY_BIN" ]] || die "VMess #$instance 配置残留不完整，无法自动恢复服务。"
-            write_service "$service" "NewWorld VMess Instance $instance" "$V2RAY_BIN run -config $config" ;;
+            instance="${service#newworld-vmess-}"; kind=VMess; binary="$V2RAY_BIN"; instance_dir="$(vmess_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary run -config $config" ;;
         newworld-vless-*.service)
-            instance="${service#newworld-vless-}"; instance="${instance%.service}"; valid_instance_id "$instance" || die "服务名中的实例编号无效：$service"
-            instance_dir="$(vless_instance_dir "$instance")"; config="$instance_dir/config.json"
-            [[ -r "$config" && -r "$instance_dir/meta" && -x "$XRAY_BIN" ]] || die "VLESS #$instance 配置残留不完整，无法自动恢复服务。"
-            write_service "$service" "NewWorld VLESS Instance $instance" "$XRAY_BIN run -config $config" ;;
+            instance="${service#newworld-vless-}"; kind=VLESS; binary="$XRAY_BIN"; instance_dir="$(vless_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary run -config $config" ;;
         *) die "无法识别需要恢复的服务：$service" ;;
     esac
+    instance="${instance%.service}"
+    valid_instance_id "$instance" || die "服务实例编号无效：$service"
+    [[ -r "$config" && -r "$instance_dir/meta" && -x "$binary" ]] || die "$kind #$instance 配置残留不完整，无法恢复服务。"
+    description="NewWorld $kind Instance $instance"; [[ "$kind" != ShadowTLS ]] || description="NewWorld ShadowTLS v3 Instance $instance"
+    write_service "$service" "$description" "$command" "$env"
     systemctl daemon-reload
     info "检测到 $service 的配置残留，已自动重建 systemd 服务。"
 }
@@ -2240,48 +2230,8 @@ check_manager_update() {
     ok "已更新到 ${remote_version}；下次运行 nw-manager 时生效。"
 }
 
-verify_managed_instance() {
-    local kind="$1" instance="$2" instance_dir service config meta label
-    case "$kind" in
-        snell) instance_dir="$(snell_instance_dir "$instance")"; service="$(snell_service "$instance")"; config="$instance_dir/snell.conf"; label="Snell #$instance" ;;
-        ss2022) instance_dir="$(ss_instance_dir "$instance")"; service="$(ss_service "$instance")"; config="$instance_dir/config.json"; label="SS-2022 #$instance" ;;
-        shadowtls) instance_dir="$(shadowtls_instance_dir "$instance")"; service="$(shadowtls_service "$instance")"; config="$instance_dir/environment"; label="ShadowTLS #$instance" ;;
-        vmess) instance_dir="$(vmess_instance_dir "$instance")"; service="$(vmess_service "$instance")"; config="$instance_dir/config.json"; label="VMess #$instance" ;;
-        vless) instance_dir="$(vless_instance_dir "$instance")"; service="$(vless_service "$instance")"; config="$instance_dir/config.json"; label="VLESS #$instance" ;;
-        *) return 1 ;;
-    esac
-    meta="$instance_dir/meta"
-    [[ -r "$config" && -r "$meta" ]] || { warn "$label 配置或元数据不可读。"; return 1; }
-    systemctl cat "$service" >/dev/null 2>&1 || { warn "$label 缺少 systemd 服务。"; return 1; }
-    systemctl is-active --quiet "$service" || { warn "$label 服务未运行。"; return 1; }
-    case "$kind" in
-        snell)
-            if ! grep -Eq '^listen[[:space:]]*=' "$config" || ! grep -Eq '^psk[[:space:]]*=' "$config" || \
-                ! grep -Eq '^version[[:space:]]*=[[:space:]]*[56]$' "$config"; then
-                warn "$label 配置字段不完整。"; return 1
-            fi ;;
-        ss2022)
-            if ! have jq || ! jq -e '.server and (.server_port | type == "number") and .password and (.method | startswith("2022-"))' "$config" >/dev/null; then
-                warn "$label JSON 配置无效。"; return 1
-            fi ;;
-        shadowtls)
-            [[ -n "$(read_meta "$config" LISTEN_PORT 2>/dev/null || true)" && -n "$(read_meta "$config" BACKEND_PORT 2>/dev/null || true)" && \
-                -n "$(read_meta "$config" TLS_HOST 2>/dev/null || true)" && -n "$(read_meta "$config" PASSWORD 2>/dev/null || true)" ]] || \
-                { warn "$label 环境配置字段不完整。"; return 1; } ;;
-        vmess)
-            if [[ ! -x "$V2RAY_BIN" ]] || ! "$V2RAY_BIN" test -config "$config" >/dev/null 2>&1; then
-                warn "$label 未通过 V2Fly 核心校验。"; return 1
-            fi ;;
-        vless)
-            if [[ ! -x "$XRAY_BIN" ]] || ! "$XRAY_BIN" run -test -config "$config" >/dev/null 2>&1; then
-                warn "$label 未通过 Xray 核心校验。"; return 1
-            fi ;;
-    esac
-    printf '%s✓%s %-20s 配置及服务正常\n' "$GREEN" "$RESET" "$label"
-}
-
 doctor() {
-    local failures=0 command os_name memory_limit="" reported="" instance commands=(bash curl systemctl ip ss)
+    local failures=0 command os_name memory_limit="" reported="" commands=(bash curl systemctl ip ss)
     [[ ! -x "$SNELL_BIN" ]] || commands+=(unzip openssl)
     [[ ! -x "$SS_BIN" ]] || commands+=(jq tar xz sha256sum)
     [[ ! -x "$STLS_BIN" ]] || commands+=(jq openssl sha256sum)
@@ -2298,13 +2248,6 @@ doctor() {
         else printf '%s✗%s %-12s 缺失\n' "$RED" "$RESET" "$command"; failures=$((failures+1)); fi
     done
     [[ -d /run/systemd/system ]] || { warn "systemd 未运行。"; failures=$((failures+1)); }
-    if [[ -d /run/systemd/system ]]; then
-        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance snell "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs snell)
-        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance ss2022 "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs ss2022)
-        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance shadowtls "$instance" || failures=$((failures+1)); done < <(shadowtls_instance_dirs)
-        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance vmess "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs vmess)
-        while read -r instance; do [[ -z "$instance" ]] || verify_managed_instance vless "$instance" || failures=$((failures+1)); done < <(proxy_instance_dirs vless)
-    fi
     if { [[ -n "$(proxy_instance_dirs vmess)" ]] || [[ -n "$(proxy_instance_dirs vless)" ]]; } && have timedatectl; then
         [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] || warn "VMess/VLESS 依赖准确系统时间，当前未确认 NTP 已同步。"
     fi
