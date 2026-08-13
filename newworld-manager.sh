@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.2.2"
+readonly VERSION="5.2.3"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -2337,4 +2337,11 @@ main() {
     esac
 }
 
-if [[ -z "${BASH_SOURCE[0]-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
+if [[ -z "${BASH_SOURCE[0]-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then
+    if [[ ! -t 0 ]] && exec 3</dev/tty 2>/dev/null; then
+        main "$@" <&3
+        exec 3<&-
+    else
+        main "$@"
+    fi
+fi
