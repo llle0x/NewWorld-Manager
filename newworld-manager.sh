@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.2.3"
+readonly VERSION="5.2.4"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -62,6 +62,13 @@ new_temp_dir() {
     path="$(mktemp -d /tmp/newworld-manager.XXXXXX)"
     TEMP_PATHS+=("$path")
     printf -v "$variable" '%s' "$path"
+}
+
+new_temp_json() {
+    local variable="$1" directory
+    directory="$(mktemp -d /tmp/newworld-manager.XXXXXX)"
+    TEMP_PATHS+=("$directory")
+    printf -v "$variable" '%s/config.json' "$directory"
 }
 
 cleanup_temp_paths() {
@@ -1530,7 +1537,7 @@ configure_vmess() {
     fi
     instance_dir="$(vmess_instance_dir "$instance")"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$VMESS_ROOT/instances" "$instance_dir"
-    config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_file config_tmp
+    config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_json config_tmp
     if [[ "$transport" == ws-tls ]]; then
         install_tls_material "$instance_dir" "$certificate" "$private_key"
         write_vmess_server_config "$config_tmp" "$transport" "$port" "$uuid" "$ws_path" "$instance_dir/certificate.pem" "$instance_dir/private.key"
@@ -1766,7 +1773,7 @@ configure_vless() {
     fi
     instance_dir="$(vless_instance_dir "$instance")"
     install -d -m 0750 -o root -g "$SERVICE_USER" "$VLESS_ROOT/instances" "$instance_dir"
-    config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_file config_tmp
+    config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_json config_tmp
     if [[ "$transport" == reality ]]; then
         write_vless_server_config "$config_tmp" reality "$port" "$uuid" "$reality_target" "$server_name" "$REALITY_PRIVATE_KEY" "$short_id"
     else

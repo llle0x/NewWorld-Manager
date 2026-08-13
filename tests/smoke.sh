@@ -2,11 +2,11 @@
 set -Eeuo pipefail
 
 inline_output="$("${BASH:-bash}" -c "$(<newworld-manager.sh)" -- --version)"
-[[ "$inline_output" == "NewWorld-Manager 5.2.3" ]]
+[[ "$inline_output" == "NewWorld-Manager 5.2.4" ]]
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.2.3" ]]
+[[ "$VERSION" == "5.2.4" ]]
 valid_instance_id 1
 valid_instance_id 99
 if valid_instance_id 0; then exit 1; fi
@@ -114,8 +114,13 @@ if command -v mktemp >/dev/null 2>&1 && command -v rm >/dev/null 2>&1; then
     smoke_temp=""
     new_temp_file smoke_temp
     [[ -f "$smoke_temp" && "$smoke_temp" == /tmp/newworld-manager.* ]]
+    smoke_json=""
+    new_temp_json smoke_json
+    [[ "$smoke_json" == /tmp/newworld-manager.*/config.json ]]
+    [[ -d "${smoke_json%/config.json}" ]]
     cleanup_temp_paths
     [[ ! -e "$smoke_temp" ]]
+    [[ ! -e "${smoke_json%/config.json}" ]]
 fi
 
 printf 'smoke tests passed\n'
