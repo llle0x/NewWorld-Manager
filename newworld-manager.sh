@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.0.0"
+readonly VERSION="5.0.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -355,7 +355,9 @@ select_shadowtls_instance() {
     done
     printf '\n' >&2
     read -r -p '请选择实例编号: ' input
-    valid_instance_id "$input" && [[ -d "$(shadowtls_instance_dir "$input")" ]] || die "实例不存在。"
+    if ! valid_instance_id "$input" || [[ ! -d "$(shadowtls_instance_dir "$input")" ]]; then
+        die "实例不存在。"
+    fi
     printf '%s' "$input"
 }
 
@@ -692,7 +694,10 @@ firewall_close() {
     [[ -n "$line" ]] || return 0
     tool="${line##*|}"
     case "$tool" in
-        ufw) firewall_active ufw && ufw --force delete allow "$rule" >/dev/null || true ;;
+        ufw)
+            if firewall_active ufw; then
+                ufw --force delete allow "$rule" >/dev/null || true
+            fi ;;
         firewalld)
             if firewall_active firewalld; then
                 firewall-cmd --permanent --remove-port="$rule" >/dev/null || true
@@ -716,7 +721,9 @@ snapshot_manager_state() {
     for file in "${service_files[@]}"; do
         service="${file##*/}"
         cp -a "$file" "$state_dir/services/$service"
-        systemctl is-active --quiet "$service" && printf '%s\n' "$service" >>"$state_dir/active" || true
+        if systemctl is-active --quiet "$service"; then
+            printf '%s\n' "$service" >>"$state_dir/active"
+        fi
     done
     for file in /etc/sysctl.d/99-newworld-snell.conf /etc/sysctl.d/99-newworld-bbr.conf; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/sysctl/${file##*/}"
@@ -1278,13 +1285,22 @@ component_service() {
     local component="$1" instance="${2:-}"
     case "$component" in
         snell)
-            [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"; valid_instance_id "$instance" && [[ -d "$(snell_instance_dir "$instance")" ]] || die "Snell 实例 $instance 不存在。"
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"
+            if ! valid_instance_id "$instance" || [[ ! -d "$(snell_instance_dir "$instance")" ]]; then
+                die "Snell 实例 $instance 不存在。"
+            fi
             snell_service "$instance" ;;
         ss|ss2022)
-            [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; valid_instance_id "$instance" && [[ -d "$(ss_instance_dir "$instance")" ]] || die "SS-2022 实例 $instance 不存在。"
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"
+            if ! valid_instance_id "$instance" || [[ ! -d "$(ss_instance_dir "$instance")" ]]; then
+                die "SS-2022 实例 $instance 不存在。"
+            fi
             ss_service "$instance" ;;
         shadowtls)
-            [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; valid_instance_id "$instance" && [[ -d "$(shadowtls_instance_dir "$instance")" ]] || die "ShadowTLS 实例 $instance 不存在。"
+            [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"
+            if ! valid_instance_id "$instance" || [[ ! -d "$(shadowtls_instance_dir "$instance")" ]]; then
+                die "ShadowTLS 实例 $instance 不存在。"
+            fi
             shadowtls_service "$instance" ;;
         *) return 1 ;;
     esac
