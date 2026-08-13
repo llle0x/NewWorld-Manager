@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.3.2" ]]
+[[ "$VERSION" == "5.3.3" ]]
 [[ "$(socket_bind :: 443)" == '[::]:443' ]]
 [[ "$(socket_bind 0.0.0.0 443)" == '0.0.0.0:443' ]]
 if [[ -r /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 && [[ "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]]; then
@@ -127,5 +127,16 @@ if command -v mktemp >/dev/null 2>&1 && command -v rm >/dev/null 2>&1; then
     [[ ! -e "$smoke_temp" ]]
     [[ ! -e "${smoke_json%/config.json}" ]]
 fi
+
+secure_calls=""
+public_bind() { printf ::; }
+proxy_instance_dirs() { printf '1\n'; }
+ss_instance_dir() { printf /tmp/ss-%s "$1"; }
+read_meta() { [[ "$2" == BIND ]] && printf :: || printf 31664; }
+shadowtls_backend_in_use() { return 0; }
+set_backend_bind() { secure_calls+="bind:$1:$2:$3 "; }
+firewall_close() { secure_calls+="close:$1:$2 "; }
+upgrade_ss_listener
+[[ "$secure_calls" == *'bind:ss2022:1:127.0.0.1'* && "$secure_calls" == *'close:31664:tcp'* && "$secure_calls" == *'close:31664:udp'* ]]
 
 printf 'smoke tests passed\n'

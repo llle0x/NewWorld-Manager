@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.3.2"
+readonly VERSION="5.3.3"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -1204,10 +1204,14 @@ configure_ss() {
 
 upgrade_ss_listener() {
     local instance meta bind
-    bind="$(public_bind)"; [[ "$bind" == :: ]] || return 0
+    bind="$(public_bind)"
     while read -r instance; do
         [[ -z "$instance" ]] && continue; meta="$(ss_instance_dir "$instance")/meta"
-        [[ "$(read_meta "$meta" BIND)" == 0.0.0.0 ]] || continue
+        if shadowtls_backend_in_use ss2022 "$instance"; then
+            if [[ "$(read_meta "$meta" BIND)" != 127.0.0.1 ]]; then set_backend_bind ss2022 "$instance" 127.0.0.1; firewall_close "$(read_meta "$meta" PORT)" tcp; firewall_close "$(read_meta "$meta" PORT)" udp; ok "SS-2022 #$instance 已限制为 ShadowTLS 本机后端。"; fi
+            continue
+        fi
+        [[ "$bind" == :: && "$(read_meta "$meta" BIND)" == 0.0.0.0 ]] || continue
         set_backend_bind ss2022 "$instance" "$bind"
         ok "SS-2022 #$instance 已改为 IPv4/IPv6 双栈监听：$bind"
     done < <(proxy_instance_dirs ss2022)
@@ -1344,12 +1348,13 @@ configure_stls() {
     port_unused "$listen_port" || die "端口 $listen_port 已被占用。"
     tls_host="$(prompt_default 'TLS 伪装域名（必须支持 TLS 1.3）' 'www.microsoft.com')"
     valid_host "$tls_host" || die "域名格式无效。"
+    if ! shadowtls_backend_in_use "$target" "$backend_instance"; then first_for_backend=true; fi
     install -d -m 0750 -o root -g "$SERVICE_USER" "$STLS_ROOT/instances" "$(shadowtls_instance_dir "$instance")"
     password="$(random_text 32)"; env="$(shadowtls_instance_dir "$instance")/environment"; meta="$(shadowtls_instance_dir "$instance")/meta"
     listen_addr="$(socket_bind "$(public_bind)" "$listen_port")"
     write_meta "$env" "LISTEN_PORT=$listen_port" "LISTEN_ADDR=$listen_addr" "BACKEND_PORT=$backend_port" "TLS_HOST=$tls_host" "PASSWORD=$password" "MONOIO_FORCE_LEGACY_DRIVER=1"
     write_meta "$meta" "VERSION=${STLS_VERSION:-unknown}" "TARGET=$target" "TARGET_INSTANCE=$backend_instance" "PORT=$listen_port" "BACKEND_PORT=$backend_port" "PREVIOUS_BIND=$previous_bind"
-    if ! shadowtls_backend_in_use "$target" "$backend_instance"; then first_for_backend=true; set_backend_bind "$target" "$backend_instance" "127.0.0.1"; firewall_close "$backend_port" tcp; fi
+    if [[ "$first_for_backend" == true ]]; then set_backend_bind "$target" "$backend_instance" "127.0.0.1"; firewall_close "$backend_port" tcp; fi
     if [[ "$first_for_backend" == true && "$target" == ss2022 ]]; then
         firewall_close "$backend_port" udp
     elif [[ "$first_for_backend" == true ]]; then
@@ -1377,9 +1382,13 @@ $(cat "$env")
 }
 
 upgrade_stls_listener() {
-    local instance env port address service old_env old_unit
+    local instance env meta target target_instance backend_dir backend_port port address service old_env old_unit
     while read -r instance; do
-        [[ -z "$instance" ]] && continue; env="$(shadowtls_instance_dir "$instance")/environment"; port="$(read_meta "$env" LISTEN_PORT)"; address="$(socket_bind "$(public_bind)" "$port")"
+        [[ -z "$instance" ]] && continue; env="$(shadowtls_instance_dir "$instance")/environment"; meta="$(shadowtls_instance_dir "$instance")/meta"
+        target="$(read_meta "$meta" TARGET)"; target_instance="$(read_meta "$meta" TARGET_INSTANCE 2>/dev/null || printf 1)"
+        if [[ "$target" == snell ]]; then backend_dir="$(snell_instance_dir "$target_instance")"; else backend_dir="$(ss_instance_dir "$target_instance")"; fi
+        if [[ "$(read_meta "$backend_dir/meta" BIND)" != 127.0.0.1 ]]; then backend_port="$(read_meta "$backend_dir/meta" PORT)"; set_backend_bind "$target" "$target_instance" 127.0.0.1; firewall_close "$backend_port" tcp; [[ "$target" != ss2022 ]] || firewall_close "$backend_port" udp; ok "$target #$target_instance 已限制为 ShadowTLS 本机后端。"; fi
+        port="$(read_meta "$env" LISTEN_PORT)"; address="$(socket_bind "$(public_bind)" "$port")"
         [[ "$(read_meta "$env" LISTEN_ADDR 2>/dev/null || true)" == "$address" ]] && continue
         new_temp_file old_env; cp -a "$env" "$old_env"; service="$(shadowtls_service "$instance")"; new_temp_file old_unit; cp -a "$SYSTEMD_DIR/$service" "$old_unit"
         printf 'LISTEN_ADDR=%s\n' "$address" >>"$env"
