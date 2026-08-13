@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # NewWorld-Manager
-# Independent Linux manager for BBR, Snell, Shadowsocks 2022 and ShadowTLS.
+# Independent Linux manager for BBR, Snell, Shadowsocks 2022, ShadowTLS and VMess.
 # It never downloads or executes third-party installation scripts.
 
 set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.0.1"
+readonly VERSION="5.1.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -18,12 +18,14 @@ readonly FIREWALL_DB="$ROOT_DIR/firewall.rules"
 readonly SNELL_BIN="$LIB_DIR/snell-server"
 readonly SS_BIN="$LIB_DIR/ssserver"
 readonly STLS_BIN="$LIB_DIR/shadow-tls"
+readonly V2RAY_BIN="$LIB_DIR/v2ray"
 readonly SNELL_SERVICE="newworld-snell.service"
 readonly SS_SERVICE="newworld-ss2022.service"
 readonly SNELL_ROOT="$ROOT_DIR/snell"
 readonly SS_ROOT="$ROOT_DIR/ss2022"
 readonly STLS_SERVICE_PREFIX="newworld-shadowtls"
 readonly STLS_ROOT="$ROOT_DIR/shadowtls"
+readonly VMESS_ROOT="$ROOT_DIR/vmess"
 
 YES=false
 UPDATE_ONLY=false
@@ -152,22 +154,23 @@ select_snell_obfs() {
 
 select_component() {
     local include_bbr="${1:-false}" input
-    printf '组件：1) Snell  2) ss-2022  3) ShadowTLS' >&2
-    [[ "$include_bbr" != true ]] || printf '  4) BBR' >&2
+    printf '组件：1) Snell  2) ss-2022  3) ShadowTLS  4) VMess' >&2
+    [[ "$include_bbr" != true ]] || printf '  5) BBR' >&2
     printf '\n' >&2
     if [[ "$include_bbr" == true ]]; then
-        read -r -p '请选择 [1-4]: ' input
+        read -r -p '请选择 [1-5]: ' input
     else
-        read -r -p '请选择 [1-3]: ' input
+        read -r -p '请选择 [1-4]: ' input
     fi
     case "$input" in
         1) printf snell ;;
         2) printf ss2022 ;;
         3) printf shadowtls ;;
-        4)
-            if [[ "$include_bbr" == true ]]; then printf bbr; else die "请选择 1-3。"; fi ;;
+        4) printf vmess ;;
+        5)
+            if [[ "$include_bbr" == true ]]; then printf bbr; else die "请选择 1-4。"; fi ;;
         *)
-            if [[ "$include_bbr" == true ]]; then die "请选择 1-4。"; else die "请选择 1-3。"; fi ;;
+            if [[ "$include_bbr" == true ]]; then die "请选择 1-5。"; else die "请选择 1-4。"; fi ;;
     esac
 }
 
@@ -175,6 +178,8 @@ valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 valid_host() { [[ "$1" =~ ^[A-Za-z0-9.-]+$ && "$1" == *.* && "$1" != .* && "$1" != *. ]]; }
 valid_psk() { [[ ${#1} -ge 16 && ${#1} -le 255 && "$1" =~ ^[A-Za-z0-9._~-]+$ ]]; }
 valid_dns() { [[ "$1" =~ ^[A-Za-z0-9.,:_-]+$ ]]; }
+valid_uuid() { [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; }
+valid_ws_path() { [[ "$1" =~ ^/[A-Za-z0-9._~/%@:+-]*$ ]]; }
 port_unused() { ! ss -H -lntup 2>/dev/null | awk '{print $5}' | grep -Eq "(^|[.:])$1$"; }
 ipv6_available() {
     [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 ]] && [[ "$(</proc/sys/net/ipv6/conf/all/disable_ipv6)" == 0 ]] && ip -6 addr show scope global 2>/dev/null | grep -q 'inet6 '
@@ -211,6 +216,13 @@ random_base64() {
     else head -c "$bytes" /dev/urandom | base64 | tr -d '\n'; fi
 }
 
+random_uuid() {
+    local hex variant
+    hex="$(openssl rand -hex 16)"
+    variant=$((16#${hex:16:1} % 4 + 8))
+    printf '%s-%s-4%s-%x%s-%s' "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" "$variant" "${hex:17:3}" "${hex:20:12}"
+}
+
 base64url() { base64 | tr '+/' '-_' | tr -d '=\n'; }
 
 print_config_block() {
@@ -244,8 +256,10 @@ valid_instance_id() { [[ "$1" =~ ^[1-9][0-9]?$ ]]; }
 
 snell_service() { printf 'newworld-snell-%s.service' "$1"; }
 ss_service() { printf 'newworld-ss2022-%s.service' "$1"; }
+vmess_service() { printf 'newworld-vmess-%s.service' "$1"; }
 snell_instance_dir() { printf '%s/instances/%s' "$SNELL_ROOT" "$1"; }
 ss_instance_dir() { printf '%s/instances/%s' "$SS_ROOT" "$1"; }
+vmess_instance_dir() { printf '%s/instances/%s' "$VMESS_ROOT" "$1"; }
 
 migrate_proxy_legacy() {
     local kind="$1" root instance_dir old_config old_meta service new_service
@@ -270,8 +284,12 @@ migrate_proxy_legacy() {
 
 proxy_instance_dirs() {
     local kind="$1" root
-    migrate_proxy_legacy "$kind"
-    [[ "$kind" == snell ]] && root="$SNELL_ROOT" || root="$SS_ROOT"
+    case "$kind" in
+        snell) migrate_proxy_legacy snell; root="$SNELL_ROOT" ;;
+        ss|ss2022) migrate_proxy_legacy ss2022; root="$SS_ROOT" ;;
+        vmess) root="$VMESS_ROOT" ;;
+        *) die "未知实例类型：$kind" ;;
+    esac
     find "$root/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -n || true
 }
 
@@ -411,6 +429,7 @@ ensure_dependencies() {
         snell) commands=(curl unzip openssl ip ss) ;;
         ss|ss2022) commands=(base64 curl jq tar xz openssl sha256sum ip ss) ;;
         shadowtls) commands=(curl jq openssl sha256sum ip ss) ;;
+        vmess) commands=(base64 curl jq unzip openssl sha256sum ip ss) ;;
         self-install) commands=(curl) ;;
         *) die "未知的依赖配置：$profile" ;;
     esac
@@ -466,7 +485,7 @@ ensure_service_user() {
 
 make_layout() {
     install -d -m 0750 -o root -g "$SERVICE_USER" \
-        "$ROOT_DIR" "$LIB_DIR" "$ROOT_DIR/snell" "$ROOT_DIR/ss2022" "$ROOT_DIR/shadowtls"
+        "$ROOT_DIR" "$LIB_DIR" "$ROOT_DIR/snell" "$ROOT_DIR/ss2022" "$ROOT_DIR/shadowtls" "$ROOT_DIR/vmess"
     touch "$FIREWALL_DB"
     chmod 0600 "$FIREWALL_DB"
 }
@@ -587,6 +606,18 @@ sync_stls_meta_versions() {
             "TARGET_INSTANCE=$(read_meta "$meta" TARGET_INSTANCE 2>/dev/null || printf 1)" "PORT=$(read_meta "$meta" PORT)" \
             "BACKEND_PORT=$(read_meta "$meta" BACKEND_PORT)" "PREVIOUS_BIND=$(read_meta "$meta" PREVIOUS_BIND)"
     done < <(shadowtls_instance_dirs)
+}
+
+sync_vmess_meta_versions() {
+    local instance meta
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        meta="$(vmess_instance_dir "$instance")/meta"
+        write_meta "$meta" "VERSION=$VMESS_VERSION" "PORT=$(read_meta "$meta" PORT)" \
+            "TRANSPORT=$(read_meta "$meta" TRANSPORT)" "DOMAIN=$(read_meta "$meta" DOMAIN 2>/dev/null || true)" \
+            "PATH=$(read_meta "$meta" PATH 2>/dev/null || true)" "CERT_SOURCE=$(read_meta "$meta" CERT_SOURCE 2>/dev/null || true)" \
+            "KEY_SOURCE=$(read_meta "$meta" KEY_SOURCE 2>/dev/null || true)"
+    done < <(proxy_instance_dirs vmess)
 }
 
 service_user_group() { id -gn "$SERVICE_USER"; }
@@ -716,7 +747,7 @@ snapshot_manager_state() {
     cp -a "$ROOT_DIR/." "$state_dir/root/"
     : >"$state_dir/active"
     shopt -s nullglob
-    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service)
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service)
     shopt -u nullglob
     for file in "${service_files[@]}"; do
         service="${file##*/}"
@@ -728,7 +759,7 @@ snapshot_manager_state() {
     for file in /etc/sysctl.d/99-newworld-snell.conf /etc/sysctl.d/99-newworld-bbr.conf; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/sysctl/${file##*/}"
     done
-    for file in "$SNELL_BIN" "$SS_BIN" "$STLS_BIN"; do
+    for file in "$SNELL_BIN" "$SS_BIN" "$STLS_BIN" "$V2RAY_BIN"; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/bin/${file##*/}"
     done
     printf -v "$variable" '%s' "$state_dir"
@@ -745,10 +776,10 @@ restore_manager_state() {
         [[ -n "$rule" && -n "$tool" ]] || continue
         firewall_close "${rule%/*}" "${rule##*/}"
     done <"$current_rules"
-    for name in snell ss2022 shadowtls firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
+    for name in snell ss2022 shadowtls vmess firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
     cp -a "$snapshot/root/." "$ROOT_DIR/"
     shopt -s nullglob
-    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service)
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service)
     for file in "${service_files[@]}"; do systemctl stop "${file##*/}" >/dev/null 2>&1 || true; rm -f "$file"; done
     service_files=("$snapshot/services"/*.service)
     for file in "${service_files[@]}"; do cp -a "$file" "$SYSTEMD_DIR/${file##*/}"; done
@@ -757,7 +788,7 @@ restore_manager_state() {
         file="/etc/sysctl.d/$name"
         if [[ -f "$snapshot/sysctl/$name" ]]; then cp -a "$snapshot/sysctl/$name" "$file"; else rm -f "$file"; fi
     done
-    for name in snell-server ssserver shadow-tls; do
+    for name in snell-server ssserver shadow-tls v2ray; do
         file="$LIB_DIR/$name"
         rm -f "${file}.previous" "${file}.new"
         [[ ! -f "$snapshot/bin/$name" ]] || cp -a "$snapshot/bin/$name" "$file"
@@ -1212,6 +1243,226 @@ install_stls() {
     fi
 }
 
+vmess_asset_pattern() {
+    case "$(architecture)" in
+        x86_64) printf 'v2ray-linux-64\\.zip$' ;;
+        aarch64) printf 'v2ray-linux-arm64-v8a\\.zip$' ;;
+        armv7) printf 'v2ray-linux-arm32-v7a\\.zip$' ;;
+        arm) printf 'v2ray-linux-arm32-v6\\.zip$' ;;
+    esac
+}
+
+install_vmess_binary() {
+    local tmpdir archive candidate
+    new_temp_dir tmpdir
+    archive="$tmpdir/v2ray.zip"
+    download_github_release v2fly/v2ray-core "$(vmess_asset_pattern)" "$archive"
+    unzip -q "$archive" -d "$tmpdir"
+    candidate="$(find "$tmpdir" -type f -name v2ray -print -quit)"
+    [[ -n "$candidate" ]] || die "V2Fly 官方压缩包中缺少 v2ray。"
+    chmod +x "$candidate"
+    "$candidate" version >/dev/null || die "V2Fly 官方二进制无法在当前系统执行。"
+    atomic_binary_install "$candidate" "$V2RAY_BIN"
+    VMESS_VERSION="$DOWNLOADED_VERSION"
+    rm -rf "$tmpdir"
+}
+
+select_vmess_transport() {
+    local input
+    printf 'VMess 传输：1) TCP（无需域名）  2) WebSocket + TLS（需要域名和证书）\n' >&2
+    read -r -p '请选择 [1-2，默认 1]: ' input
+    case "$input" in
+        ""|1|tcp) printf tcp ;;
+        2|ws-tls) printf ws-tls ;;
+        *) die "VMess 传输请选择 1 或 2。" ;;
+    esac
+}
+
+validate_vmess_tls_material() {
+    local domain="$1" certificate="$2" private_key="$3" cert_public key_public
+    [[ -r "$certificate" ]] || die "无法读取 TLS 证书：$certificate"
+    [[ -r "$private_key" ]] || die "无法读取 TLS 私钥：$private_key"
+    openssl x509 -in "$certificate" -noout >/dev/null 2>&1 || die "TLS 证书格式无效。"
+    openssl pkey -in "$private_key" -noout >/dev/null 2>&1 || die "TLS 私钥格式无效或存在密码。"
+    openssl x509 -in "$certificate" -checkend 0 -noout >/dev/null 2>&1 || die "TLS 证书已过期。"
+    cert_public="$(openssl x509 -in "$certificate" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+    key_public="$(openssl pkey -in "$private_key" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+    [[ -n "$cert_public" && "$cert_public" == "$key_public" ]] || die "TLS 证书与私钥不匹配。"
+    if openssl x509 -help 2>&1 | grep -q -- '-checkhost'; then
+        openssl x509 -in "$certificate" -checkhost "$domain" -noout >/dev/null 2>&1 || die "TLS 证书不包含域名 $domain。"
+    else
+        warn "当前 OpenSSL 无法自动校验证书域名，已校验有效期及密钥配对。"
+    fi
+}
+
+install_vmess_tls_material() {
+    local instance_dir="$1" certificate="$2" private_key="$3"
+    install -m 0640 -o root -g "$SERVICE_USER" -- "$certificate" "$instance_dir/certificate.pem.new"
+    install -m 0640 -o root -g "$SERVICE_USER" -- "$private_key" "$instance_dir/private.key.new"
+    mv -f "$instance_dir/certificate.pem.new" "$instance_dir/certificate.pem"
+    mv -f "$instance_dir/private.key.new" "$instance_dir/private.key"
+}
+
+write_vmess_server_config() {
+    local output="$1" transport="$2" port="$3" uuid="$4" ws_path="${5:-}" certificate="${6:-}" private_key="${7:-}"
+    if [[ "$transport" == ws-tls ]]; then
+        jq -n --argjson port "$port" --arg uuid "$uuid" --arg path "$ws_path" --arg cert "$certificate" --arg key "$private_key" \
+            '{log:{loglevel:"warning"},inbounds:[{listen:"0.0.0.0",port:$port,protocol:"vmess",tag:"vmess-in",settings:{clients:[{id:$uuid,alterId:0}],disableInsecureEncryption:true},streamSettings:{network:"ws",security:"tls",tlsSettings:{minVersion:"1.2",alpn:["http/1.1"],certificates:[{certificateFile:$cert,keyFile:$key}]},wsSettings:{path:$path}}}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"}]}' >"$output"
+    else
+        jq -n --argjson port "$port" --arg uuid "$uuid" \
+            '{log:{loglevel:"warning"},inbounds:[{listen:"0.0.0.0",port:$port,protocol:"vmess",tag:"vmess-in",settings:{clients:[{id:$uuid,alterId:0}],disableInsecureEncryption:true},streamSettings:{network:"tcp",security:"none"}}],outbounds:[{protocol:"freedom",tag:"direct"},{protocol:"blackhole",tag:"blocked"}]}' >"$output"
+    fi
+}
+
+refresh_vmess_tls_materials() {
+    local instance instance_dir meta domain certificate private_key updated=0
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        instance_dir="$(vmess_instance_dir "$instance")"; meta="$instance_dir/meta"
+        [[ "$(read_meta "$meta" TRANSPORT 2>/dev/null || true)" == ws-tls ]] || continue
+        domain="$(read_meta "$meta" DOMAIN)"; certificate="$(read_meta "$meta" CERT_SOURCE)"; private_key="$(read_meta "$meta" KEY_SOURCE)"
+        if [[ ! -r "$certificate" || ! -r "$private_key" ]]; then
+            warn "VMess #$instance 的证书源文件不可读，保留当前证书。"
+            continue
+        fi
+        if cmp -s "$certificate" "$instance_dir/certificate.pem" && cmp -s "$private_key" "$instance_dir/private.key"; then
+            continue
+        fi
+        if ! (validate_vmess_tls_material "$domain" "$certificate" "$private_key"); then
+            warn "VMess #$instance 的新证书校验失败，保留当前证书。"
+            continue
+        fi
+        if [[ ! -f "$instance_dir/certificate.pem" || ! -f "$instance_dir/private.key" ]]; then
+            warn "VMess #$instance 的托管证书不完整，请重新配置该实例。"
+            continue
+        fi
+        cp -a "$instance_dir/certificate.pem" "$instance_dir/certificate.pem.previous"
+        cp -a "$instance_dir/private.key" "$instance_dir/private.key.previous"
+        install_vmess_tls_material "$instance_dir" "$certificate" "$private_key"
+        if ! systemctl restart "$(vmess_service "$instance")" || ! systemctl is-active --quiet "$(vmess_service "$instance")"; then
+            mv -f "$instance_dir/certificate.pem.previous" "$instance_dir/certificate.pem"
+            mv -f "$instance_dir/private.key.previous" "$instance_dir/private.key"
+            systemctl restart "$(vmess_service "$instance")" >/dev/null 2>&1 || true
+            warn "VMess #$instance 新证书启动失败，已恢复原证书。"
+            continue
+        fi
+        rm -f "$instance_dir/certificate.pem.previous" "$instance_dir/private.key.previous"
+        updated=$((updated + 1))
+        ok "VMess #$instance 的 TLS 证书已同步并重启。"
+    done < <(proxy_instance_dirs vmess)
+    VMESS_CERT_UPDATES="$updated"
+}
+
+configure_vmess() {
+    local instance="${1:-}" transport port uuid domain="" ws_path="" certificate="" private_key="" instance_dir config meta config_tmp service
+    [[ -n "$instance" ]] || { show_existing_instances vmess; read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+    [[ ! -d "$(vmess_instance_dir "$instance")" ]] || die "VMess 实例 $instance 已存在。"
+    transport="$(select_vmess_transport)"
+    if [[ "$transport" == ws-tls ]]; then
+        port="$(prompt_default '监听端口' '443')"
+    else
+        port="$(prompt_default '监听端口' "$(random_port)")"
+    fi
+    valid_port "$port" || die "端口无效。"
+    port_unused "$port" || die "端口 $port 已被占用。"
+    read -r -p 'UUID（留空自动生成）: ' uuid; uuid="${uuid:-$(random_uuid)}"
+    valid_uuid "$uuid" || die "UUID 格式无效。"
+    if [[ "$transport" == ws-tls ]]; then
+        domain="$(prompt_default 'TLS 域名' 'example.com')"; valid_host "$domain" || die "域名格式无效。"
+        ws_path="$(prompt_default 'WebSocket 路径' "/$(random_text 12)")"; valid_ws_path "$ws_path" || die "WebSocket 路径必须以 / 开头且不能包含空格。"
+        certificate="$(prompt_default 'TLS 证书路径' "/etc/letsencrypt/live/$domain/fullchain.pem")"
+        private_key="$(prompt_default 'TLS 私钥路径' "/etc/letsencrypt/live/$domain/privkey.pem")"
+        [[ "$certificate" == /* && "$private_key" == /* ]] || die "TLS 证书和私钥必须使用绝对路径。"
+        validate_vmess_tls_material "$domain" "$certificate" "$private_key"
+    fi
+    instance_dir="$(vmess_instance_dir "$instance")"
+    install -d -m 0750 -o root -g "$SERVICE_USER" "$VMESS_ROOT/instances" "$instance_dir"
+    config="$instance_dir/config.json"; meta="$instance_dir/meta"; new_temp_file config_tmp
+    if [[ "$transport" == ws-tls ]]; then
+        install_vmess_tls_material "$instance_dir" "$certificate" "$private_key"
+        write_vmess_server_config "$config_tmp" "$transport" "$port" "$uuid" "$ws_path" "$instance_dir/certificate.pem" "$instance_dir/private.key"
+    else
+        write_vmess_server_config "$config_tmp" "$transport" "$port" "$uuid"
+    fi
+    if ! "$V2RAY_BIN" test -config "$config_tmp" >/dev/null; then
+        rm -rf "$instance_dir"
+        die "VMess 配置未通过 V2Fly 官方内核校验。"
+    fi
+    install -m 0640 -o root -g "$SERVICE_USER" "$config_tmp" "$config"; rm -f "$config_tmp"
+    write_meta "$meta" "VERSION=${VMESS_VERSION:-unknown}" "PORT=$port" "TRANSPORT=$transport" "DOMAIN=$domain" "PATH=$ws_path" \
+        "CERT_SOURCE=$certificate" "KEY_SOURCE=$private_key"
+    service="$(vmess_service "$instance")"
+    write_service "$service" "NewWorld VMess Instance $instance" "$V2RAY_BIN run -config $config"
+    if ! reload_start "$service"; then
+        systemctl disable --now "$service" >/dev/null 2>&1 || true
+        rm -f "$SYSTEMD_DIR/$service"; rm -rf "$instance_dir"; systemctl daemon-reload
+        die "VMess 实例 $instance 启动失败，已清理未完成安装。"
+    fi
+    firewall_open "$port" tcp
+    show_config vmess "$instance"
+    if [[ "$transport" == ws-tls ]]; then
+        warn "证书续期后运行 nw-manager update vmess，脚本会同步新证书。"
+    fi
+}
+
+install_vmess() {
+    local instance meta port updated=0 instances current
+    local -a services=()
+    instances="$(proxy_instance_dirs vmess)"
+    if [[ "$UPDATE_ONLY" == true ]]; then
+        [[ -n "$instances" ]] || die "尚未安装 VMess 实例，无法执行更新。"
+        instance=""
+    elif [[ -z "$instances" ]]; then
+        read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"
+    else
+        show_existing_instances vmess
+        read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance
+    fi
+    RELEASE_CHECK_ONLY=true download_github_release v2fly/v2ray-core "$(vmess_asset_pattern)" /dev/null
+    VMESS_VERSION="$DOWNLOADED_VERSION"
+    VMESS_CERT_UPDATES=0
+    [[ -z "$instances" ]] || refresh_vmess_tls_materials
+    if [[ -z "$instance" ]]; then
+        if [[ ! -x "$V2RAY_BIN" ]]; then
+            while read -r current; do [[ -z "$current" ]] || updated=$((updated + 1)); done < <(proxy_instance_dirs vmess)
+        else
+            while read -r current; do
+                [[ -z "$current" ]] || [[ "$(read_meta "$(vmess_instance_dir "$current")/meta" VERSION)" != "$VMESS_VERSION" ]] && updated=$((updated + 1))
+            done < <(proxy_instance_dirs vmess)
+        fi
+        if ((updated == 0)); then
+            if ((VMESS_CERT_UPDATES > 0)); then
+                ok "V2Fly 核心已是最新版本：$VMESS_VERSION；已同步 ${VMESS_CERT_UPDATES} 个 TLS 证书。"
+            else
+                ok "V2Fly 核心已是最新版本：$VMESS_VERSION（无需更新）。"
+            fi
+            return
+        fi
+        install_vmess_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(vmess_service "$current")"); done < <(proxy_instance_dirs vmess)
+        restart_services_or_rollback "$V2RAY_BIN" "${services[@]}"
+        sync_vmess_meta_versions
+        while read -r current; do
+            [[ -z "$current" ]] && continue
+            meta="$(vmess_instance_dir "$current")/meta"; port="$(read_meta "$meta" PORT)"; firewall_open "$port" tcp
+        done < <(proxy_instance_dirs vmess)
+        ok "已更新全部 ${updated} 个 VMess 实例到 ${VMESS_VERSION}。"
+        return
+    fi
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+    [[ ! -d "$(vmess_instance_dir "$instance")" ]] || die "VMess 实例 $instance 已存在；直接回车可更新全部实例。"
+    if [[ -x "$V2RAY_BIN" && -n "$instances" ]] && [[ "$(read_meta "$(vmess_instance_dir "${instances%%$'\n'*}")/meta" VERSION)" == "$VMESS_VERSION" ]]; then
+        info "V2Fly 核心已是最新版：${VMESS_VERSION}，直接创建新实例。"
+    else
+        install_vmess_binary
+        while read -r current; do [[ -z "$current" ]] || services+=("$(vmess_service "$current")"); done < <(proxy_instance_dirs vmess)
+        restart_services_or_rollback "$V2RAY_BIN" "${services[@]}"
+        sync_vmess_meta_versions
+    fi
+    configure_vmess "$instance"
+}
+
 enable_bbr() {
     local available config="/etc/sysctl.d/99-newworld-bbr.conf"
     modprobe tcp_bbr 2>/dev/null || true
@@ -1243,9 +1494,11 @@ remove_component() {
         snell) migrate_proxy_legacy snell; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance snell)"; label="Snell #$instance" ;;
         ss|ss2022) migrate_proxy_legacy ss2022; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance ss2022)"; label="SS-2022 #$instance" ;;
         shadowtls) shadowtls_migrate_legacy; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; label="ShadowTLS #$instance" ;;
+        vmess) instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance vmess)"; label="VMess #$instance" ;;
         bbr) label=BBR ;;
         *) die "未知组件：$component" ;;
     esac
+    [[ "$component" == bbr ]] || valid_instance_id "$instance" || die "实例编号无效。"
     confirm "确定卸载 ${label} 及其配置？" || { warn "已取消。"; return 0; }
     case "$component" in
         snell)
@@ -1275,6 +1528,12 @@ remove_component() {
                 else protocol="$(read_meta "$instance_dir/meta" PROTOCOL 2>/dev/null || printf 5)"; [[ "$protocol" != 5 ]] || firewall_open "$port" udp; fi
             fi
             if [[ -z "$(shadowtls_instance_dirs)" ]]; then rm -f "$STLS_BIN" "${STLS_BIN}.previous"; rm -rf "$STLS_ROOT"; fi ;;
+        vmess)
+            instance_dir="$(vmess_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"
+            port="$(read_meta "$instance_dir/meta" PORT)"
+            systemctl disable --now "$(vmess_service "$instance")" >/dev/null 2>&1 || true
+            firewall_close "$port" tcp; rm -f "$SYSTEMD_DIR/$(vmess_service "$instance")"; rm -rf "$instance_dir"
+            [[ -n "$(proxy_instance_dirs vmess)" ]] || { rm -f "$V2RAY_BIN" "${V2RAY_BIN}.previous"; rm -rf "$VMESS_ROOT"; } ;;
         bbr) disable_bbr; return 0 ;;
     esac
     systemctl daemon-reload; systemctl reset-failed >/dev/null 2>&1 || true
@@ -1302,6 +1561,12 @@ component_service() {
                 die "ShadowTLS 实例 $instance 不存在。"
             fi
             shadowtls_service "$instance" ;;
+        vmess)
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance vmess)"
+            if ! valid_instance_id "$instance" || [[ ! -d "$(vmess_instance_dir "$instance")" ]]; then
+                die "VMess 实例 $instance 不存在。"
+            fi
+            vmess_service "$instance" ;;
         *) return 1 ;;
     esac
 }
@@ -1338,14 +1603,21 @@ show_status() {
         instance_dir="$(shadowtls_instance_dir "$instance")"
         printf '%-16s %-12s %-14s\n' "ShadowTLS #$instance" "$(service_state "$(shadowtls_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
     done < <(shadowtls_instance_dirs)
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; instance_dir="$(vmess_instance_dir "$instance")"
+        printf '%-16s %-12s %-14s\n' "VMess #$instance" "$(service_state "$(vmess_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
+    done < <(proxy_instance_dirs vmess)
     algo="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
     qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
     printf 'BBR：%s（qdisc=%s，kernel=%s）\n\n' "$algo" "$qdisc" "$(uname -r)"
 }
 
 show_config() {
-    local component="$1" requested_instance="${2:-}" routed_stls="${3:-}" instance instances wrappers config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target
+    local component="$1" requested_instance="${2:-}" routed_stls="${3:-}" instance instances wrappers config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target uuid transport domain ws_path vmess_json vmess_link
     require_root
+    if [[ -n "$requested_instance" ]]; then
+        valid_instance_id "$requested_instance" || die "实例编号无效。"
+    fi
     [[ -n "$PUBLIC_IP_CACHE" ]] || PUBLIC_IP_CACHE="$(public_ip)"
     if [[ -z "$requested_instance" ]]; then
         case "$component" in
@@ -1360,6 +1632,10 @@ show_config() {
             shadowtls)
                 instances="$(shadowtls_instance_dirs)"; [[ -n "$instances" ]] || die "未安装 ShadowTLS 实例。"
                 while read -r instance; do [[ -z "$instance" ]] || show_config shadowtls "$instance"; done <<<"$instances"
+                return ;;
+            vmess)
+                instances="$(proxy_instance_dirs vmess)"; [[ -n "$instances" ]] || die "未安装 VMess 实例。"
+                while read -r instance; do [[ -z "$instance" ]] || show_config vmess "$instance"; done <<<"$instances"
                 return ;;
         esac
     fi
@@ -1420,6 +1696,24 @@ show_config() {
 $(cat "$config")
 后端 = $(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET 2>/dev/null || printf unknown) #$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1) (127.0.0.1:$(read_meta "$(shadowtls_instance_dir "$target")/meta" BACKEND_PORT 2>/dev/null || printf unknown))"
             show_config "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET)" "$(read_meta "$(shadowtls_instance_dir "$target")/meta" TARGET_INSTANCE 2>/dev/null || printf 1)" "$target" ;;
+        vmess)
+            instance="$requested_instance"; config="$(vmess_instance_dir "$instance")/config.json"; meta="$(vmess_instance_dir "$instance")/meta"
+            [[ -f "$config" ]] || die "VMess 实例不存在。"
+            port="$(read_meta "$meta" PORT)"; transport="$(read_meta "$meta" TRANSPORT)"
+            uuid="$(jq -er '.inbounds[0].settings.clients[0].id' "$config")"
+            domain="$(read_meta "$meta" DOMAIN 2>/dev/null || true)"; ws_path="$(read_meta "$meta" PATH 2>/dev/null || true)"
+            if [[ "$transport" == ws-tls ]]; then
+                vmess_json="$(jq -cn --arg name "$(hostname)-VMess-${instance}" --arg address "$domain" --arg port "$port" --arg uuid "$uuid" --arg host "$domain" --arg path "$ws_path" \
+                    '{v:"2",ps:$name,add:$address,port:$port,id:$uuid,aid:"0",scy:"auto",net:"ws",type:"none",host:$host,path:$path,tls:"tls",sni:$host,alpn:"http/1.1"}')"
+            else
+                vmess_json="$(jq -cn --arg name "$(hostname)-VMess-${instance}" --arg address "$(public_ip)" --arg port "$port" --arg uuid "$uuid" \
+                    '{v:"2",ps:$name,add:$address,port:$port,id:$uuid,aid:"0",scy:"auto",net:"tcp",type:"none",host:"",path:"",tls:""}')"
+            fi
+            vmess_link="vmess://$(printf '%s' "$vmess_json" | base64 | tr -d '\n')"
+            print_config_block "VMess 客户端配置（实例 ${instance}）" "${vmess_link}
+
+$(jq . <<<"$vmess_json")"
+            print_config_block "VMess 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(jq . "$config")" ;;
         *) die "未知组件。" ;;
     esac
 }
@@ -1438,6 +1732,9 @@ reconfigure_component() {
         shadowtls)
             instance="$(select_shadowtls_instance)"; version="$(read_meta "$(shadowtls_instance_dir "$instance")/meta" VERSION)"
             binary="$STLS_BIN" ;;
+        vmess)
+            instance="$(select_proxy_instance vmess)"; version="$(read_meta "$(vmess_instance_dir "$instance")/meta" VERSION)"
+            binary="$V2RAY_BIN" ;;
         *) die "未知组件：$component" ;;
     esac
     snapshot_manager_state snapshot
@@ -1450,6 +1747,7 @@ reconfigure_component() {
             snell) SNELL_VERSION="$version"; configure_snell "$protocol" "$instance" ;;
             ss|ss2022) SS_VERSION="$version"; configure_ss "$instance" ;;
             shadowtls) STLS_VERSION="$version"; configure_stls "$instance" ;;
+            vmess) VMESS_VERSION="$version"; configure_vmess "$instance" ;;
         esac
     ); then
         rm -rf -- "$snapshot"
@@ -1511,6 +1809,7 @@ doctor() {
     [[ ! -x "$SNELL_BIN" ]] || commands+=(unzip openssl)
     [[ ! -x "$SS_BIN" ]] || commands+=(jq tar xz sha256sum)
     [[ ! -x "$STLS_BIN" ]] || commands+=(jq openssl sha256sum)
+    [[ ! -x "$V2RAY_BIN" ]] || commands+=(base64 jq unzip openssl sha256sum)
     os_name="$(sed -nE 's/^PRETTY_NAME="?([^\"]*)"?$/\1/p' /etc/os-release 2>/dev/null | head -n1 || true)"
     printf '系统：%s\n架构：%s\n包管理器：' "${os_name:-未知 Linux}" "$(uname -m)"
     package_manager 2>/dev/null || printf '未支持'; printf '\n'
@@ -1522,6 +1821,9 @@ doctor() {
         else printf '%s✗%s %-12s 缺失\n' "$RED" "$RESET" "$command"; failures=$((failures+1)); fi
     done
     [[ -d /run/systemd/system ]] || { warn "systemd 未运行。"; failures=$((failures+1)); }
+    if [[ -n "$(proxy_instance_dirs vmess)" ]] && have timedatectl; then
+        [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]] || warn "VMess 依赖准确系统时间，当前未确认 NTP 已同步。"
+    fi
     [[ "$(id -u)" -eq 0 ]] || warn "当前不是 root，仅执行只读检查。"
     return "$failures"
 }
@@ -1532,13 +1834,13 @@ $APP $VERSION
 
 用法：
   $(basename "$0") status
-  $(basename "$0") install <bbr|snell|ss2022|shadowtls>
-  $(basename "$0") update <snell|ss2022|shadowtls>
-  $(basename "$0") configure <snell|ss2022|shadowtls>
-  $(basename "$0") remove <bbr|snell|ss2022|shadowtls> [实例号]
-  $(basename "$0") restart <snell|ss2022|shadowtls> [实例号]
-  $(basename "$0") logs <snell|ss2022|shadowtls> [行数] [实例号]
-  $(basename "$0") config <snell|ss2022|shadowtls> [实例号]
+  $(basename "$0") install <bbr|snell|ss2022|shadowtls|vmess>
+  $(basename "$0") update <snell|ss2022|shadowtls|vmess>
+  $(basename "$0") configure <snell|ss2022|shadowtls|vmess>
+  $(basename "$0") remove <bbr|snell|ss2022|shadowtls|vmess> [实例号]
+  $(basename "$0") restart <snell|ss2022|shadowtls|vmess> [实例号]
+  $(basename "$0") logs <snell|ss2022|shadowtls|vmess> [行数] [实例号]
+  $(basename "$0") config <snell|ss2022|shadowtls|vmess> [实例号]
   $(basename "$0") doctor | check-update | self-install | menu
 
 选项：-y/--yes  --no-color  -h/--help  -V/--version
@@ -1547,22 +1849,22 @@ EOF
 
 install_component() {
     ensure_dependencies "$1"
-    case "$1" in bbr) enable_bbr;; snell) install_snell;; ss|ss2022) install_ss;; shadowtls) install_stls;; *) die "未知组件：$1";; esac
+    case "$1" in bbr) enable_bbr;; snell) install_snell;; ss|ss2022) install_ss;; shadowtls) install_stls;; vmess) install_vmess;; *) die "未知组件：$1";; esac
 }
 
 menu() {
     local choice component
     while true; do
         clear 2>/dev/null || true; show_status
-        printf '1. 启用 BBR          2. 安装/更新 Snell\n3. 安装/更新 ss-2022 4. 安装/更新 ShadowTLS\n5. 查看配置          6. 查看日志\n7. 重启服务          8. 卸载组件\n9. 环境检查          10. 安装 nw-manager 命令\n11. 检查脚本更新     0. 退出\n'
-        read -r -p '请选择 [0-11]: ' choice
+        printf '1. 启用 BBR          2. 安装/更新 Snell\n3. 安装/更新 ss-2022 4. 安装/更新 ShadowTLS\n5. 查看配置          6. 查看日志\n7. 重启服务          8. 卸载组件\n9. 环境检查          10. 安装 nw-manager 命令\n11. 检查脚本更新  12. 安装/更新 VMess\n0. 退出\n'
+        read -r -p '请选择 [0-12]: ' choice
         case "$choice" in
             1) install_component bbr;; 2) install_component snell;; 3) install_component ss2022;; 4) install_component shadowtls;;
-            5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; esac; show_config "$component";;
+            5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; esac; show_config "$component";;
             6) journalctl -u "$(select_component_service)" -n 100 --no-pager;;
             7) systemctl restart "$(select_component_service)";;
             8) component="$(select_component true)"; remove_component "$component";;
-            9) doctor || true;; 10) install_manager;; 11) check_manager_update;; 0) return 0;; *) warn "选择无效。";;
+            9) doctor || true;; 10) install_manager;; 11) check_manager_update;; 12) install_component vmess;; 0) return 0;; *) warn "选择无效。";;
         esac
         [[ -t 0 ]] && { printf '\n按回车返回...'; read -r _; }
     done
@@ -1598,7 +1900,7 @@ main() {
             service="$(component_service "$component" "${3:-}")" || die "未知组件。"; journalctl -u "$service" -n "$lines" --no-pager;;
         config)
             component="${1:-}"; require_root
-            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; esac
+            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; esac
             show_config "$component" "${2:-}";;
         configure)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"

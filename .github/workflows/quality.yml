@@ -15,6 +15,10 @@ jobs:
       - name: Bash syntax
         run: bash -n newworld-manager.sh
       - name: ShellCheck
-        run: shellcheck -S style newworld-manager.sh tests/smoke.sh
+        run: shellcheck -S style newworld-manager.sh tests/smoke.sh tests/vmess-integration.sh
       - name: Smoke tests
         run: bash tests/smoke.sh
+      - name: VMess integration tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash tests/vmess-integration.sh
