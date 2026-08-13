@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.3.1"
+readonly VERSION="5.3.2"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -249,7 +249,7 @@ uri_host() {
 }
 
 public_bind() {
-    [[ -s /proc/net/if_inet6 && "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]] && printf :: || printf 0.0.0.0
+    [[ -r /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 && [[ "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]] && printf :: || printf 0.0.0.0
 }
 
 socket_bind() { [[ "$1" == :: ]] && printf '[::]:%s' "$2" || printf '%s:%s' "$1" "$2"; }
@@ -1209,7 +1209,7 @@ upgrade_ss_listener() {
         [[ -z "$instance" ]] && continue; meta="$(ss_instance_dir "$instance")/meta"
         [[ "$(read_meta "$meta" BIND)" == 0.0.0.0 ]] || continue
         set_backend_bind ss2022 "$instance" "$bind"
-        ok "SS-2022 #$instance 已改为 IPv4/IPv6 双栈监听。"
+        ok "SS-2022 #$instance 已改为 IPv4/IPv6 双栈监听：$bind"
     done < <(proxy_instance_dirs ss2022)
 }
 
@@ -1385,7 +1385,9 @@ upgrade_stls_listener() {
         printf 'LISTEN_ADDR=%s\n' "$address" >>"$env"
         write_service "$service" "NewWorld ShadowTLS v3 Instance $instance" "$STLS_BIN --v3 server --listen \${LISTEN_ADDR} --server 127.0.0.1:\${BACKEND_PORT} --tls \${TLS_HOST} --password \${PASSWORD}" "$env"
         systemctl daemon-reload
-        if systemctl restart "$service" && systemctl is-active --quiet "$service"; then ok "ShadowTLS #$instance dual-stack listener: $address"; else
+        if systemctl restart "$service" && systemctl is-active --quiet "$service"; then
+            [[ "$address" == \[::\]:* ]] && ok "ShadowTLS #$instance 已使用 IPv4/IPv6 双栈监听：$address" || warn "ShadowTLS #$instance 当前系统仅可使用 IPv4 监听：$address"
+        else
             cp -a "$old_env" "$env"; cp -a "$old_unit" "$SYSTEMD_DIR/$service"; systemctl daemon-reload; systemctl restart "$service" || true; warn "ShadowTLS #$instance 无法使用 $address，已恢复原监听。"
         fi
     done < <(shadowtls_instance_dirs)

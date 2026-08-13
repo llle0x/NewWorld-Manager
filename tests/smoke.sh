@@ -3,9 +3,12 @@ set -Eeuo pipefail
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.3.1" ]]
+[[ "$VERSION" == "5.3.2" ]]
 [[ "$(socket_bind :: 443)" == '[::]:443' ]]
 [[ "$(socket_bind 0.0.0.0 443)" == '0.0.0.0:443' ]]
+if [[ -r /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 && [[ "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]]; then
+    [[ "$(public_bind)" == :: ]]
+fi
 grep -q 'VMess 客户端配置（实例 .*Surge \[Proxy\]' newworld-manager.sh
 grep -q 'SS-2022 客户端配置（实例 .*Surge \[Proxy\]' newworld-manager.sh
 grep -q 'Surge 当前不支持 VLESS' newworld-manager.sh
