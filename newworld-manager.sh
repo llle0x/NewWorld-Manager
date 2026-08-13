@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.1.0"
+readonly VERSION="5.1.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -514,7 +514,7 @@ download_github_release() {
     local repo="$1" pattern="$2" output="$3" json url digest count token_config="" token_args=()
     new_temp_file json
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        [[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_]+$ ]] || die "GITHUB_TOKEN 格式无效。"
+        [[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_.-]+$ ]] || die "GITHUB_TOKEN 格式无效。"
         new_temp_file token_config
         printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_TOKEN" >"$token_config"
         token_args=(--config "$token_config")
