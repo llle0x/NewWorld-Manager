@@ -1,16 +1,17 @@
 # NewWorld-Manager
 
-用于管理 Linux BBR、Snell Server、shadowsocks-rust（SS-2022）、ShadowTLS v3、V2Fly VMess 和 Xray VLESS 的独立 Bash 脚本。组件只从各自官方发布源下载，不执行第三方安装脚本。
+用于管理 Linux BBR、Snell Server、shadowsocks-rust（SS-2022）、ShadowTLS v3、V2Fly VMess、Xray VLESS 和 Hysteria 2 的独立 Bash 脚本。组件只从各自官方发布源下载，不执行第三方安装脚本。
 
 ## 主要功能
 
-- Snell、SS-2022、ShadowTLS、VMess、VLESS 均支持 `1–99` 多实例。
+- Snell、SS-2022、ShadowTLS、VMess、VLESS、Hysteria 2 均支持 `1–99` 多实例。
 - 首次安装直接回车使用实例 `1`。
 - 已有实例时，输入新编号创建实例，直接回车检查并更新全部现有实例。
 - 查看配置时选择组件即可显示该组件全部实例；命令行可指定单个实例。
 - ShadowTLS 可绑定到指定 Snell/SS-2022 实例，同一后端也可配置多个 ShadowTLS 入口。
 - VMess 使用 V2Fly 官方核心，支持 TCP 和 WebSocket + TLS，默认使用 AEAD（`alterId: 0`）。
 - VLESS 使用 XTLS/Xray-core 官方核心，支持推荐的 REALITY + Vision，以及 WebSocket + TLS。
+- Hysteria 2 使用官方下载站的最新 Linux 二进制，支持 TLS 证书、Salamander 混淆、`hysteria2://` URI 和 Surge 配置；服务端仅开放 UDP 端口。
 - 更新前先检查官方版本；已是最新版时不下载、不重启。
 - 多实例批量更新任一服务启动失败时，恢复旧二进制并重启全部实例。
 - 实例配置仍在但 systemd 单元丢失时，安装、更新或重启会自动重建服务；状态栏会明确显示“服务缺失”。
@@ -57,6 +58,7 @@ nw-manager install ss2022
 nw-manager install shadowtls
 nw-manager install vmess
 nw-manager install vless
+nw-manager install hysteria2
 nw-manager update snell
 nw-manager update vmess
 nw-manager update vless
@@ -87,6 +89,7 @@ nw-manager remove shadowtls 1
 - ShadowTLS：外部地址、端口、密码、SNI、后端实例和配套的后端客户端配置。
 - VMess：完整 `vmess://` 链接、客户端 JSON 及服务器 JSON。
 - VLESS：完整 `vless://` 链接、Xray 客户端 JSON 及服务器 JSON。
+- Hysteria 2：完整 `hysteria2://` URI、Surge `[Proxy]` 配置及服务器 YAML。
 - 一个后端绑定多个 ShadowTLS 时，会分别输出每个 ShadowTLS 入口的客户端配置。
 
 配置包含密钥，请勿公开分享。
@@ -97,7 +100,7 @@ nw-manager remove shadowtls 1
 - 普通 VPS 上服务使用低权限用户和 systemd 加固；受限容器中自动采用兼容模式。
 - 二进制原子替换，批量更新失败时整体回滚。
 - 优先使用 GitHub API 摘要或官方 `.sha256`/`.dgst` 文件校验 SHA-256；上游没有摘要时会明确警告并验证二进制可执行。
-- GitHub Actions 使用官方 Linux 二进制验证 SS-2022、ShadowTLS、VMess、VLESS REALITY 和 VLESS WS+TLS 配置。
+- GitHub Actions 使用官方 Linux 二进制验证 SS-2022、ShadowTLS、VMess、VLESS 和 Hysteria 2 配置。
 - 防火墙只删除脚本自己添加并记录的 UFW/firewalld 规则。
 - BBR 使用独立的 `/etc/sysctl.d/99-newworld-bbr.conf`，不修改 `/etc/sysctl.conf`。
 - 自更新先执行 Bash 语法检查，再原子替换全局脚本。
@@ -106,7 +109,7 @@ nw-manager remove shadowtls 1
 
 - 配置：`/etc/newworld-manager`
 - 二进制：`/usr/local/lib/newworld-manager`
-- systemd：`newworld-snell-<实例>.service`、`newworld-ss2022-<实例>.service`、`newworld-shadowtls-<实例>.service`、`newworld-vmess-<实例>.service`、`newworld-vless-<实例>.service`
+- systemd：`newworld-snell-<实例>.service`、`newworld-ss2022-<实例>.service`、`newworld-shadowtls-<实例>.service`、`newworld-vmess-<实例>.service`、`newworld-vless-<实例>.service`、`newworld-hysteria2-<实例>.service`
 - 全局命令：`/usr/local/bin/nw-manager` → `/usr/local/sbin/newworld-manager`
 
 ## 官方来源
@@ -118,6 +121,7 @@ nw-manager remove shadowtls 1
 - [VMess 官方配置文档](https://www.v2fly.org/config/protocols/vmess.html)
 - [XTLS / Xray-core](https://github.com/XTLS/Xray-core)
 - [VLESS 官方配置文档](https://xtls.github.io/config/inbounds/vless.html)
+- [Hysteria 2 官方文档](https://v2.hysteria.network/zh/docs/getting-started/Installation/)
 - [REALITY 官方配置文档](https://xtls.github.io/config/transports/reality.html)
 - [Linux 网络 sysctl 文档](https://docs.kernel.org/admin-guide/sysctl/net.html)
 

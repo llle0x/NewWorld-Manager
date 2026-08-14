@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.3.3" ]]
+[[ "$VERSION" == "5.4.0" ]]
 [[ "$(socket_bind :: 443)" == '[::]:443' ]]
 [[ "$(socket_bind 0.0.0.0 443)" == '0.0.0.0:443' ]]
 if [[ -r /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 && [[ "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]]; then
@@ -62,7 +62,9 @@ unset -f proxy_instance_dirs
 [[ "$(select_component <<<3)" == shadowtls ]]
 [[ "$(select_component <<<4)" == vmess ]]
 [[ "$(select_component <<<5)" == vless ]]
-[[ "$(select_component true <<<6)" == bbr ]]
+[[ "$(select_component <<<6)" == hysteria2 ]]
+[[ "$(select_component true <<<7)" == bbr ]]
+[[ "$(hysteria_asset)" == hysteria-linux-amd64 || "$(hysteria_asset)" == hysteria-linux-arm64 || "$(hysteria_asset)" == hysteria-linux-arm ]]
 
 checksum_file="$(mktemp /tmp/newworld-manager.checksum.XXXXXX)"
 printf 'SHA2-256= ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789\n' >"$checksum_file"

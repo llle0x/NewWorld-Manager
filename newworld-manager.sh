@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.3.3"
+readonly VERSION="5.4.0"
 readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -18,6 +18,7 @@ readonly SS_BIN="$LIB_DIR/ssserver"
 readonly STLS_BIN="$LIB_DIR/shadow-tls"
 readonly V2RAY_BIN="$LIB_DIR/v2ray"
 readonly XRAY_BIN="$LIB_DIR/xray"
+readonly HYSTERIA_BIN="$LIB_DIR/hysteria"
 readonly SNELL_SERVICE="newworld-snell.service"
 readonly SS_SERVICE="newworld-ss2022.service"
 readonly SNELL_ROOT="$ROOT_DIR/snell"
@@ -26,6 +27,7 @@ readonly STLS_SERVICE_PREFIX="newworld-shadowtls"
 readonly STLS_ROOT="$ROOT_DIR/shadowtls"
 readonly VMESS_ROOT="$ROOT_DIR/vmess"
 readonly VLESS_ROOT="$ROOT_DIR/vless"
+readonly HYSTERIA_ROOT="$ROOT_DIR/hysteria2"
 
 YES=false
 UPDATE_ONLY=false
@@ -161,13 +163,13 @@ select_snell_obfs() {
 
 select_component() {
     local include_bbr="${1:-false}" input
-    printf '组件：1) Snell  2) ss-2022  3) ShadowTLS  4) VMess  5) VLESS' >&2
-    [[ "$include_bbr" != true ]] || printf '  6) BBR' >&2
+    printf '组件：1) Snell  2) ss-2022  3) ShadowTLS  4) VMess  5) VLESS  6) Hysteria 2' >&2
+    [[ "$include_bbr" != true ]] || printf '  7) BBR' >&2
     printf '\n' >&2
     if [[ "$include_bbr" == true ]]; then
-        read -r -p '请选择 [1-6]: ' input
+        read -r -p '请选择 [1-7]: ' input
     else
-        read -r -p '请选择 [1-5]: ' input
+        read -r -p '请选择 [1-6]: ' input
     fi
     case "$input" in
         1) printf snell ;;
@@ -175,10 +177,11 @@ select_component() {
         3) printf shadowtls ;;
         4) printf vmess ;;
         5) printf vless ;;
-        6)
-            if [[ "$include_bbr" == true ]]; then printf bbr; else die "请选择 1-5。"; fi ;;
+        6) printf hysteria2 ;;
+        7)
+            if [[ "$include_bbr" == true ]]; then printf bbr; else die "请选择 1-6。"; fi ;;
         *)
-            if [[ "$include_bbr" == true ]]; then die "请选择 1-6。"; else die "请选择 1-5。"; fi ;;
+            if [[ "$include_bbr" == true ]]; then die "请选择 1-7。"; else die "请选择 1-6。"; fi ;;
     esac
 }
 
@@ -287,10 +290,12 @@ snell_service() { printf 'newworld-snell-%s.service' "$1"; }
 ss_service() { printf 'newworld-ss2022-%s.service' "$1"; }
 vmess_service() { printf 'newworld-vmess-%s.service' "$1"; }
 vless_service() { printf 'newworld-vless-%s.service' "$1"; }
+hysteria_service() { printf 'newworld-hysteria2-%s.service' "$1"; }
 snell_instance_dir() { printf '%s/instances/%s' "$SNELL_ROOT" "$1"; }
 ss_instance_dir() { printf '%s/instances/%s' "$SS_ROOT" "$1"; }
 vmess_instance_dir() { printf '%s/instances/%s' "$VMESS_ROOT" "$1"; }
 vless_instance_dir() { printf '%s/instances/%s' "$VLESS_ROOT" "$1"; }
+hysteria_instance_dir() { printf '%s/instances/%s' "$HYSTERIA_ROOT" "$1"; }
 
 migrate_proxy_legacy() {
     local kind="$1" root instance_dir old_config old_meta service new_service
@@ -320,6 +325,7 @@ proxy_instance_dirs() {
         ss|ss2022) migrate_proxy_legacy ss2022; root="$SS_ROOT" ;;
         vmess) root="$VMESS_ROOT" ;;
         vless) root="$VLESS_ROOT" ;;
+        hysteria2|hysteria) root="$HYSTERIA_ROOT" ;;
         *) die "未知实例类型：$kind" ;;
     esac
     find "$root/instances" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | awk '/^[1-9][0-9]?$/' | sort -n || true
@@ -465,6 +471,7 @@ ensure_dependencies() {
         shadowtls) commands=(curl jq openssl sha256sum ip ss) ;;
         vmess) commands=(base64 curl jq unzip openssl sha256sum ip ss) ;;
         vless) commands=(base64 curl jq unzip openssl sha256sum ip ss) ;;
+        hysteria|hysteria2) commands=(curl openssl ip ss) ;;
         self-install) commands=(curl) ;;
         *) die "未知的依赖配置：$profile" ;;
     esac
@@ -520,7 +527,7 @@ ensure_service_user() {
 
 make_layout() {
     install -d -m 0750 -o root -g "$SERVICE_USER" \
-        "$ROOT_DIR" "$LIB_DIR" "$ROOT_DIR/snell" "$ROOT_DIR/ss2022" "$ROOT_DIR/shadowtls" "$ROOT_DIR/vmess" "$ROOT_DIR/vless"
+        "$ROOT_DIR" "$LIB_DIR" "$ROOT_DIR/snell" "$ROOT_DIR/ss2022" "$ROOT_DIR/shadowtls" "$ROOT_DIR/vmess" "$ROOT_DIR/vless" "$ROOT_DIR/hysteria2"
     touch "$FIREWALL_DB"
     chmod 0600 "$FIREWALL_DB"
 }
@@ -764,6 +771,8 @@ repair_service_unit() {
             instance="${service#newworld-vmess-}"; kind=VMess; binary="$V2RAY_BIN"; instance_dir="$(vmess_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary run -config $config" ;;
         newworld-vless-*.service)
             instance="${service#newworld-vless-}"; kind=VLESS; binary="$XRAY_BIN"; instance_dir="$(vless_instance_dir "${instance%.service}")"; config="$instance_dir/config.json"; command="$binary run -config $config" ;;
+        newworld-hysteria2-*.service)
+            instance="${service#newworld-hysteria2-}"; kind="Hysteria 2"; binary="$HYSTERIA_BIN"; instance_dir="$(hysteria_instance_dir "${instance%.service}")"; config="$instance_dir/config.yaml"; command="$binary server -c $config" ;;
         *) die "无法识别需要恢复的服务：$service" ;;
     esac
     instance="${instance%.service}"
@@ -790,6 +799,7 @@ repair_existing_service_units() {
             shadowtls) service="$(shadowtls_service "$instance")" ;;
             vmess) service="$(vmess_service "$instance")" ;;
             vless) service="$(vless_service "$instance")" ;;
+            hysteria|hysteria2) service="$(hysteria_service "$instance")" ;;
         esac
         systemctl cat "$service" >/dev/null 2>&1 && continue
         repair_service_unit "$service"
@@ -892,7 +902,7 @@ snapshot_manager_state() {
     cp -a "$ROOT_DIR/." "$state_dir/root/"
     : >"$state_dir/active"
     shopt -s nullglob
-    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service "$SYSTEMD_DIR"/newworld-vless*.service)
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service "$SYSTEMD_DIR"/newworld-vless*.service "$SYSTEMD_DIR"/newworld-hysteria2*.service)
     shopt -u nullglob
     for file in "${service_files[@]}"; do
         service="${file##*/}"
@@ -904,7 +914,7 @@ snapshot_manager_state() {
     for file in /etc/sysctl.d/99-newworld-snell.conf /etc/sysctl.d/99-newworld-bbr.conf; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/sysctl/${file##*/}"
     done
-    for file in "$SNELL_BIN" "$SS_BIN" "$STLS_BIN" "$V2RAY_BIN" "$XRAY_BIN"; do
+    for file in "$SNELL_BIN" "$SS_BIN" "$STLS_BIN" "$V2RAY_BIN" "$XRAY_BIN" "$HYSTERIA_BIN"; do
         [[ ! -f "$file" ]] || cp -a "$file" "$state_dir/bin/${file##*/}"
     done
     printf -v "$variable" '%s' "$state_dir"
@@ -921,10 +931,10 @@ restore_manager_state() {
         [[ -n "$rule" && -n "$tool" ]] || continue
         firewall_close "${rule%/*}" "${rule##*/}"
     done <"$current_rules"
-    for name in snell ss2022 shadowtls vmess vless firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
+    for name in snell ss2022 shadowtls vmess vless hysteria2 firewall.rules; do rm -rf -- "${ROOT_DIR:?}/$name"; done
     cp -a "$snapshot/root/." "$ROOT_DIR/"
     shopt -s nullglob
-    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service "$SYSTEMD_DIR"/newworld-vless*.service)
+    service_files=("$SYSTEMD_DIR"/newworld-snell*.service "$SYSTEMD_DIR"/newworld-ss2022*.service "$SYSTEMD_DIR"/newworld-shadowtls*.service "$SYSTEMD_DIR"/newworld-vmess*.service "$SYSTEMD_DIR"/newworld-vless*.service "$SYSTEMD_DIR"/newworld-hysteria2*.service)
     for file in "${service_files[@]}"; do systemctl stop "${file##*/}" >/dev/null 2>&1 || true; rm -f "$file"; done
     service_files=("$snapshot/services"/*.service)
     for file in "${service_files[@]}"; do cp -a "$file" "$SYSTEMD_DIR/${file##*/}"; done
@@ -933,7 +943,7 @@ restore_manager_state() {
         file="/etc/sysctl.d/$name"
         if [[ -f "$snapshot/sysctl/$name" ]]; then cp -a "$snapshot/sysctl/$name" "$file"; else rm -f "$file"; fi
     done
-    for name in snell-server ssserver shadow-tls v2ray xray; do
+    for name in snell-server ssserver shadow-tls v2ray xray hysteria; do
         file="$LIB_DIR/$name"
         rm -f "$file" "${file}.previous" "${file}.new"
         [[ ! -f "$snapshot/bin/$name" ]] || cp -a "$snapshot/bin/$name" "$file"
@@ -1907,6 +1917,69 @@ install_vless() {
     configure_vless "$instance"
 }
 
+hysteria_asset() {
+    case "$(architecture)" in x86_64) printf hysteria-linux-amd64;; aarch64) printf hysteria-linux-arm64;; armv7) printf hysteria-linux-arm;; *) die "Hysteria 2 不支持当前架构。";; esac
+}
+
+select_hysteria_obfs() {
+    local input
+    printf 'Hysteria 2 混淆：1) 关闭  2) Salamander\n' >&2
+    read -r -p '请选择 [1-2，默认 2]: ' input
+    case "$input" in ""|2|salamander) printf salamander;; 1|off) printf off;; *) die "请选择 1 或 2。";; esac
+}
+
+install_hysteria_binary() {
+    local tmpdir candidate current
+    new_temp_dir tmpdir; candidate="$tmpdir/hysteria"
+    info "从 Hysteria 官方下载站下载最新 Hysteria 2"
+    download "https://download.hysteria.network/app/latest/$(hysteria_asset)" "$candidate"
+    chmod +x "$candidate"; HYSTERIA_VERSION="$("$candidate" version 2>/dev/null | sed -nE 's/^Version:[[:space:]]*//p' | head -n1)"; HYSTERIA_VERSION="${HYSTERIA_VERSION:-unknown}"
+    current=""; [[ ! -x "$HYSTERIA_BIN" ]] || current="$("$HYSTERIA_BIN" version 2>/dev/null | sed -nE 's/^Version:[[:space:]]*//p' | head -n1)"
+    if [[ -n "$current" && "$current" == "$HYSTERIA_VERSION" ]]; then rm -rf "$tmpdir"; return 1; fi
+    warn "Hysteria 官方最新下载地址未提供独立 SHA-256；已使用 HTTPS 并验证二进制可执行。"
+    atomic_binary_install "$candidate" "$HYSTERIA_BIN"; rm -rf "$tmpdir"; return 0
+}
+
+configure_hysteria() {
+    local instance="${1:-}" port password domain certificate private_key obfs obfs_password masquerade instance_dir config meta service
+    [[ -n "$instance" ]] || { show_existing_instances hysteria2; read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"; }
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"
+    [[ ! -d "$(hysteria_instance_dir "$instance")" ]] || die "Hysteria 2 实例 $instance 已存在。"
+    port="$(prompt_default '监听端口（UDP）' '443')"; valid_port "$port" || die "端口无效。"; port_unused "$port" || die "端口 $port 已被占用。"
+    domain="$(prompt_default 'TLS 域名' 'example.com')"; valid_host "$domain" || die "域名格式无效。"
+    certificate="$(prompt_default 'TLS 证书路径' "/etc/letsencrypt/live/$domain/fullchain.pem")"; private_key="$(prompt_default 'TLS 私钥路径' "/etc/letsencrypt/live/$domain/privkey.pem")"
+    [[ "$certificate" == /* && "$private_key" == /* ]] || die "TLS 证书和私钥必须使用绝对路径。"; validate_tls_material "$domain" "$certificate" "$private_key"
+    password="$(random_text 32)"; obfs="$(select_hysteria_obfs)"; obfs_password=""; [[ "$obfs" != salamander ]] || obfs_password="$(random_text 32)"
+    masquerade="$(prompt_default '伪装站点 URL' 'https://www.apple.com/')"; [[ "$masquerade" == https://* && "$masquerade" != *[[:space:]]* ]] || die "伪装站点必须是有效 HTTPS URL。"
+    instance_dir="$(hysteria_instance_dir "$instance")"; install -d -m 0750 -o root -g "$SERVICE_USER" "$HYSTERIA_ROOT/instances" "$instance_dir"; install_tls_material "$instance_dir" "$certificate" "$private_key"
+    config="$instance_dir/config.yaml"; meta="$instance_dir/meta"
+    {
+        printf 'listen: :%s\ntls:\n  cert: %s\n  key: %s\nauth:\n  type: password\n  password: %s\n' "$port" "$instance_dir/certificate.pem" "$instance_dir/private.key" "$password"
+        [[ "$obfs" != salamander ]] || printf 'obfs:\n  type: salamander\n  salamander:\n    password: %s\n' "$obfs_password"
+        printf 'masquerade:\n  type: proxy\n  proxy:\n    url: %s\n    rewriteHost: true\n' "$masquerade"
+    } >"$config"
+    chmod 0640 "$config"; chown root:"$SERVICE_USER" "$config"; write_meta "$meta" "VERSION=${HYSTERIA_VERSION:-unknown}" "PORT=$port" "DOMAIN=$domain" "PASSWORD=$password" "OBFS=$obfs" "OBFS_PASSWORD=$obfs_password" "CERT_SOURCE=$certificate" "KEY_SOURCE=$private_key"
+    service="$(hysteria_service "$instance")"; write_service "$service" "NewWorld Hysteria 2 Instance $instance" "$HYSTERIA_BIN server -c $config"
+    if ! reload_start "$service"; then systemctl disable --now "$service" >/dev/null 2>&1 || true; rm -f "$SYSTEMD_DIR/$service"; rm -rf "$instance_dir"; systemctl daemon-reload; die "Hysteria 2 实例启动失败，已清理未完成安装。"; fi
+    firewall_open "$port" udp; show_config hysteria2 "$instance"
+}
+
+install_hysteria() {
+    local instance instances current updated=0
+    instances="$(proxy_instance_dirs hysteria2)"; repair_existing_service_units hysteria2 "$HYSTERIA_BIN"
+    [[ "$UPDATE_ONLY" != true || -n "$instances" ]] || die "尚未安装 Hysteria 2 实例，无法执行更新。"
+    if [[ "$UPDATE_ONLY" == true || -n "$instances" ]]; then show_existing_instances hysteria2; read -r -p '实例编号（1–99）：输入新编号安装实例，直接回车更新现有实例: ' instance; else read -r -p '首次安装实例编号 [1]: ' instance; instance="${instance:-1}"; fi
+    if [[ -z "$instance" ]]; then
+        if ! install_hysteria_binary; then ok "Hysteria 2 已是最新版本：${HYSTERIA_VERSION}（无需更新）。"; return; fi
+        while read -r current; do [[ -z "$current" ]] || restart_service_checked "$(hysteria_service "$current")"; done <<<"$instances"
+        while read -r current; do [[ -z "$current" ]] || write_meta "$(hysteria_instance_dir "$current")/meta" "VERSION=$HYSTERIA_VERSION" "PORT=$(read_meta "$(hysteria_instance_dir "$current")/meta" PORT)" "DOMAIN=$(read_meta "$(hysteria_instance_dir "$current")/meta" DOMAIN)" "PASSWORD=$(read_meta "$(hysteria_instance_dir "$current")/meta" PASSWORD)" "OBFS=$(read_meta "$(hysteria_instance_dir "$current")/meta" OBFS)" "OBFS_PASSWORD=$(read_meta "$(hysteria_instance_dir "$current")/meta" OBFS_PASSWORD)" "CERT_SOURCE=$(read_meta "$(hysteria_instance_dir "$current")/meta" CERT_SOURCE)" "KEY_SOURCE=$(read_meta "$(hysteria_instance_dir "$current")/meta" KEY_SOURCE)"; done <<<"$instances"
+        ok "已更新 Hysteria 2 实例到 ${HYSTERIA_VERSION}。"; return
+    fi
+    valid_instance_id "$instance" || die "实例编号必须为 1-99 的正整数。"; [[ ! -d "$(hysteria_instance_dir "$instance")" ]] || die "Hysteria 2 实例 $instance 已存在；直接回车可更新全部实例。"
+    install_hysteria_binary || info "Hysteria 2 二进制已是最新版本：${HYSTERIA_VERSION}。"
+    configure_hysteria "$instance"
+}
+
 enable_bbr() {
     local available config="/etc/sysctl.d/99-newworld-bbr.conf"
     modprobe tcp_bbr 2>/dev/null || true
@@ -1940,6 +2013,7 @@ remove_component() {
         shadowtls) shadowtls_migrate_legacy; instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_shadowtls_instance)"; label="ShadowTLS #$instance" ;;
         vmess) instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance vmess)"; label="VMess #$instance" ;;
         vless) instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance vless)"; label="VLESS #$instance" ;;
+        hysteria|hysteria2) instance="${2:-}"; [[ -n "$instance" ]] || instance="$(select_proxy_instance hysteria2)"; label="Hysteria 2 #$instance" ;;
         bbr) label=BBR ;;
         *) die "未知组件：$component" ;;
     esac
@@ -1985,6 +2059,11 @@ remove_component() {
             systemctl disable --now "$(vless_service "$instance")" >/dev/null 2>&1 || true
             firewall_close "$port" tcp; rm -f "$SYSTEMD_DIR/$(vless_service "$instance")"; rm -rf "$instance_dir"
             [[ -n "$(proxy_instance_dirs vless)" ]] || { rm -f "$XRAY_BIN" "${XRAY_BIN}.previous"; rm -rf "$VLESS_ROOT"; } ;;
+        hysteria|hysteria2)
+            instance_dir="$(hysteria_instance_dir "$instance")"; [[ -d "$instance_dir" ]] || die "实例不存在。"; port="$(read_meta "$instance_dir/meta" PORT)"
+            systemctl disable --now "$(hysteria_service "$instance")" >/dev/null 2>&1 || true; firewall_close "$port" udp
+            rm -f "$SYSTEMD_DIR/$(hysteria_service "$instance")"; rm -rf "$instance_dir"
+            [[ -n "$(proxy_instance_dirs hysteria2)" ]] || { rm -f "$HYSTERIA_BIN" "${HYSTERIA_BIN}.previous"; rm -rf "$HYSTERIA_ROOT"; } ;;
         bbr) disable_bbr; return 0 ;;
     esac
     systemctl daemon-reload; systemctl reset-failed >/dev/null 2>&1 || true
@@ -2024,6 +2103,10 @@ component_service() {
                 die "VLESS 实例 $instance 不存在。"
             fi
             vless_service "$instance" ;;
+        hysteria|hysteria2)
+            [[ -n "$instance" ]] || instance="$(select_proxy_instance hysteria2)"
+            if ! valid_instance_id "$instance" || [[ ! -d "$(hysteria_instance_dir "$instance")" ]]; then die "Hysteria 2 实例 $instance 不存在。"; fi
+            hysteria_service "$instance" ;;
         *) return 1 ;;
     esac
 }
@@ -2068,6 +2151,10 @@ show_status() {
         [[ -z "$instance" ]] && continue; instance_dir="$(vless_instance_dir "$instance")"
         printf '%-16s %-12s %-14s\n' "VLESS #$instance" "$(service_state "$(vless_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
     done < <(proxy_instance_dirs vless)
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue; instance_dir="$(hysteria_instance_dir "$instance")"
+        printf '%-16s %-12s %-14s\n' "Hysteria2 #$instance" "$(service_state "$(hysteria_service "$instance")")" "$(read_meta "$instance_dir/meta" VERSION 2>/dev/null || printf '-')"
+    done < <(proxy_instance_dirs hysteria2)
     algo="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
     qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
     printf 'BBR：%s（qdisc=%s，kernel=%s）\n\n' "$algo" "$qdisc" "$(uname -r)"
@@ -2075,7 +2162,7 @@ show_status() {
 
 show_config() {
     local component="$1" requested_instance="${2:-}" routed_stls="${3:-}" instance instances wrappers config meta port psk protocol tfo mode obfs obfs_host method password ss_url client_config external_port stls_options target uuid transport domain ws_path vmess_json vmess_link
-    local server_name reality_password short_id address vless_link client_tmp name encoded_name
+    local server_name reality_password short_id address vless_link client_tmp name encoded_name hysteria_link obfs_password
     require_root
     if [[ -n "$requested_instance" ]]; then
         valid_instance_id "$requested_instance" || die "实例编号无效。"
@@ -2102,6 +2189,10 @@ show_config() {
             vless)
                 instances="$(proxy_instance_dirs vless)"; [[ -n "$instances" ]] || die "未安装 VLESS 实例。"
                 while read -r instance; do [[ -z "$instance" ]] || show_config vless "$instance"; done <<<"$instances"
+                return ;;
+            hysteria|hysteria2)
+                instances="$(proxy_instance_dirs hysteria2)"; [[ -n "$instances" ]] || die "未安装 Hysteria 2 实例。"
+                while read -r instance; do [[ -z "$instance" ]] || show_config hysteria2 "$instance"; done <<<"$instances"
                 return ;;
         esac
     fi
@@ -2210,6 +2301,14 @@ $(jq . "$client_tmp")"
             print_config_block "VLESS 与 Surge" "Surge 当前不支持 VLESS，无法生成可用的 [Proxy] 配置；请使用上方 VLESS 链接或 JSON。"
             rm -f "$client_tmp"
             print_config_block "VLESS 服务器配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(jq . "$config")" ;;
+        hysteria|hysteria2)
+            instance="$requested_instance"; config="$(hysteria_instance_dir "$instance")/config.yaml"; meta="$(hysteria_instance_dir "$instance")/meta"; [[ -f "$config" ]] || die "Hysteria 2 实例不存在。"
+            port="$(read_meta "$meta" PORT)"; domain="$(read_meta "$meta" DOMAIN)"; password="$(read_meta "$meta" PASSWORD)"; obfs="$(read_meta "$meta" OBFS)"; obfs_password="$(read_meta "$meta" OBFS_PASSWORD 2>/dev/null || true)"
+            hysteria_link="hysteria2://$(uri_encode "$password")@${domain}:${port}/?sni=$(uri_encode "$domain")"; [[ "$obfs" != salamander ]] || hysteria_link+="&obfs=salamander&obfs-password=$(uri_encode "$obfs_password")"
+            print_config_block "Hysteria 2 客户端配置（实例 ${instance}）" "$hysteria_link"
+            client_config="$(hostname)-Hysteria2-${instance} = hysteria2, ${domain}, ${port}, password=${password}, sni=${domain}"; [[ "$obfs" != salamander ]] || client_config+=", salamander-password=${obfs_password}"
+            print_config_block "Hysteria 2 客户端配置（实例 ${instance}，Surge [Proxy]）" "$client_config"
+            print_config_block "Hysteria 2 服务端配置（实例 ${instance}，$(read_meta "$meta" VERSION 2>/dev/null || printf unknown)）" "$(cat "$config")" ;;
         *) die "未知组件。" ;;
     esac
 }
@@ -2234,6 +2333,9 @@ reconfigure_component() {
         vless)
             instance="$(select_proxy_instance vless)"; version="$(read_meta "$(vless_instance_dir "$instance")/meta" VERSION)"
             binary="$XRAY_BIN" ;;
+        hysteria|hysteria2)
+            instance="$(select_proxy_instance hysteria2)"; version="$(read_meta "$(hysteria_instance_dir "$instance")/meta" VERSION)"
+            binary="$HYSTERIA_BIN" ;;
         *) die "未知组件：$component" ;;
     esac
     snapshot_manager_state snapshot
@@ -2248,6 +2350,7 @@ reconfigure_component() {
             shadowtls) STLS_VERSION="$version"; configure_stls "$instance" ;;
             vmess) VMESS_VERSION="$version"; configure_vmess "$instance" ;;
             vless) VLESS_VERSION="$version"; configure_vless "$instance" ;;
+            hysteria|hysteria2) HYSTERIA_VERSION="$version"; configure_hysteria "$instance" ;;
         esac
     ); then
         rm -rf -- "$snapshot"
@@ -2311,6 +2414,7 @@ doctor() {
     [[ ! -x "$STLS_BIN" ]] || commands+=(jq openssl sha256sum)
     [[ ! -x "$V2RAY_BIN" ]] || commands+=(base64 jq unzip openssl sha256sum)
     [[ ! -x "$XRAY_BIN" ]] || commands+=(jq unzip openssl sha256sum)
+    [[ ! -x "$HYSTERIA_BIN" ]] || commands+=(openssl)
     os_name="$(sed -nE 's/^PRETTY_NAME="?([^\"]*)"?$/\1/p' /etc/os-release 2>/dev/null | head -n1 || true)"
     printf '系统：%s\n架构：%s\n包管理器：' "${os_name:-未知 Linux}" "$(uname -m)"
     package_manager 2>/dev/null || printf '未支持'; printf '\n'
@@ -2335,13 +2439,13 @@ $APP $VERSION
 
 用法：
   $(basename "$0") status
-  $(basename "$0") install <bbr|snell|ss2022|shadowtls|vmess|vless>
-  $(basename "$0") update <snell|ss2022|shadowtls|vmess|vless>
-  $(basename "$0") configure <snell|ss2022|shadowtls|vmess|vless>
-  $(basename "$0") remove <bbr|snell|ss2022|shadowtls|vmess|vless> [实例号]
-  $(basename "$0") restart <snell|ss2022|shadowtls|vmess|vless> [实例号]
-  $(basename "$0") logs <snell|ss2022|shadowtls|vmess|vless> [行数] [实例号]
-  $(basename "$0") config <snell|ss2022|shadowtls|vmess|vless> [实例号]
+  $(basename "$0") install <bbr|snell|ss2022|shadowtls|vmess|vless|hysteria2>
+  $(basename "$0") update <snell|ss2022|shadowtls|vmess|vless|hysteria2>
+  $(basename "$0") configure <snell|ss2022|shadowtls|vmess|vless|hysteria2>
+  $(basename "$0") remove <bbr|snell|ss2022|shadowtls|vmess|vless|hysteria2> [实例号]
+  $(basename "$0") restart <snell|ss2022|shadowtls|vmess|vless|hysteria2> [实例号]
+  $(basename "$0") logs <snell|ss2022|shadowtls|vmess|vless|hysteria2> [行数] [实例号]
+  $(basename "$0") config <snell|ss2022|shadowtls|vmess|vless|hysteria2> [实例号]
   $(basename "$0") doctor | check-update | self-install | menu
 
 选项：-y/--yes  --no-color  -h/--help  -V/--version
@@ -2350,22 +2454,20 @@ EOF
 
 install_component() {
     ensure_dependencies "$1"
-    case "$1" in bbr) enable_bbr;; snell) install_snell;; ss|ss2022) install_ss;; shadowtls) install_stls;; vmess) install_vmess;; vless) install_vless;; *) die "未知组件：$1";; esac
+    case "$1" in bbr) enable_bbr;; snell) install_snell;; ss|ss2022) install_ss;; shadowtls) install_stls;; vmess) install_vmess;; vless) install_vless;; hysteria|hysteria2) install_hysteria;; *) die "未知组件：$1";; esac
 }
 
 menu() {
     local choice component
     while true; do
         clear 2>/dev/null || true; show_status
-        printf '1. 启用 BBR          2. 安装/更新 Snell\n3. 安装/更新 ss-2022 4. 安装/更新 ShadowTLS\n5. 查看配置          6. 查看日志\n7. 重启服务          8. 卸载组件\n9. 环境检查          10. 安装 nw-manager 命令\n11. 检查脚本更新     12. 安装/更新 VMess\n13. 安装/更新 VLESS  0. 退出\n'
-        read -r -p '请选择 [0-13]: ' choice
+        printf '1. 安装/更新 Snell      2. 安装/更新 ss-2022\n3. 安装/更新 ShadowTLS  4. 安装/更新 VMess\n5. 安装/更新 VLESS      6. 安装/更新 Hysteria 2\n7. 查看配置             8. 查看日志\n9. 重启服务             10. 卸载组件\n11. 启用 BBR            12. 环境检查\n13. 安装 nw-manager 命令 14. 检查脚本更新\n0. 退出\n'
+        read -r -p '请选择 [0-14]: ' choice
         case "$choice" in
-            1) install_component bbr;; 2) install_component snell;; 3) install_component ss2022;; 4) install_component shadowtls;;
-            5) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; esac; show_config "$component";;
-            6) journalctl -u "$(select_component_service)" -n 100 --no-pager;;
-            7) restart_service_checked "$(select_component_service)";;
-            8) component="$(select_component true)"; remove_component "$component";;
-            9) doctor || true;; 10) install_manager;; 11) check_manager_update;; 12) install_component vmess;; 13) install_component vless;; 0) return 0;; *) warn "选择无效。";;
+            1) install_component snell;; 2) install_component ss2022;; 3) install_component shadowtls;; 4) install_component vmess;; 5) install_component vless;; 6) install_component hysteria2;;
+            7) component="$(select_component)"; case "$component" in ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; hysteria2) ensure_dependencies hysteria2;; esac; show_config "$component";;
+            8) journalctl -u "$(select_component_service)" -n 100 --no-pager;; 9) restart_service_checked "$(select_component_service)";;
+            10) component="$(select_component true)"; remove_component "$component";; 11) install_component bbr;; 12) doctor || true;; 13) install_manager;; 14) check_manager_update;; 0) return 0;; *) warn "选择无效。";;
         esac
         [[ -t 0 ]] && { printf '\n按回车返回...'; read -r _; }
     done
@@ -2401,7 +2503,7 @@ main() {
             service="$(component_service "$component" "${3:-}")" || die "未知组件。"; journalctl -u "$service" -n "$lines" --no-pager;;
         config)
             component="${1:-}"; require_root
-            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; esac
+            case "$component" in ss|ss2022) ensure_dependencies ss2022;; shadowtls) ensure_dependencies shadowtls;; vmess) ensure_dependencies vmess;; vless) ensure_dependencies vless;; hysteria|hysteria2) ensure_dependencies hysteria2;; esac
             show_config "$component" "${2:-}";;
         configure)
             component="${1:-}"; [[ -n "$component" ]] || die "缺少组件名。"
