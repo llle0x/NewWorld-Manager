@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Sourcing the script must expose helpers without starting the menu.
 source ./newworld-manager.sh
-[[ "$VERSION" == "5.4.0" ]]
+[[ "$VERSION" == "5.4.1" ]]
 [[ "$(socket_bind :: 443)" == '[::]:443' ]]
 [[ "$(socket_bind 0.0.0.0 443)" == '0.0.0.0:443' ]]
 if [[ -r /proc/net/if_inet6 ]] && grep -q . /proc/net/if_inet6 && [[ "$(sysctl -n net.ipv6.bindv6only 2>/dev/null || printf 1)" == 0 ]]; then
