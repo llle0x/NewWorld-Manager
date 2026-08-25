@@ -6,7 +6,7 @@ umask 027
 
 readonly APP="NewWorld-Manager"
 readonly VERSION="5.4.0"
-readonly SOURCE_URL="https://raw.githubusercontent.com/nihcuijp/NewWorld-Manager/main/newworld-manager.sh"
+readonly SOURCE_URL="https://raw.githubusercontent.com/llle0x/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
 readonly BIN_DIR="/usr/local/bin"
