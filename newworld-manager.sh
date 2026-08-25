@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 readonly APP="NewWorld-Manager"
-readonly VERSION="5.4.0"
+readonly VERSION="5.4.1"
 readonly SOURCE_URL="https://raw.githubusercontent.com/llle0x/NewWorld-Manager/main/newworld-manager.sh"
 readonly ROOT_DIR="/etc/newworld-manager"
 readonly LIB_DIR="/usr/local/lib/newworld-manager"
@@ -679,6 +679,33 @@ sync_snell_meta_versions() {
     done < <(proxy_instance_dirs snell)
 }
 
+repair_snell_metadata() {
+    local instance instance_dir config meta listen endpoint protocol port bind recovery_dir service
+    while read -r instance; do
+        [[ -z "$instance" ]] && continue
+        instance_dir="$(snell_instance_dir "$instance")"; config="$instance_dir/snell.conf"; meta="$instance_dir/meta"
+        if [[ ! -r "$config" ]]; then
+            recovery_dir="$SNELL_ROOT/recovery/instance-${instance}-$(date +%Y%m%d%H%M%S)"
+            install -d -m 0700 -o root -g root "$SNELL_ROOT/recovery"
+            mv "$instance_dir" "$recovery_dir"
+            service="$(snell_service "$instance")"; systemctl disable --now "$service" >/dev/null 2>&1 || true
+            rm -f "$SYSTEMD_DIR/$service"; systemctl daemon-reload
+            warn "Snell #$instance 缺少服务器配置，残留文件已移至 $recovery_dir；现在可以重新安装该编号。"
+            continue
+        fi
+        [[ -r "$meta" ]] && continue
+        listen="$(sed -nE 's/^listen[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$config" | head -n1)"
+        protocol="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*([0-9]+).*$/\1/p' "$config" | head -n1)"
+        endpoint="${listen%%,*}"; port="${endpoint##*:}"
+        [[ "$protocol" == 5 || "$protocol" == 6 ]] || die "Snell #$instance 配置中的协议版本无效，无法恢复服务。"
+        valid_port "$port" || die "Snell #$instance 配置中的监听端口无效，无法恢复服务。"
+        if [[ "$listen" == *,* ]]; then bind=dual
+        else bind="${endpoint%:*}"; bind="${bind#\[}"; bind="${bind%\]}"; [[ -n "$bind" ]] || bind=0.0.0.0; fi
+        write_meta "$meta" "VERSION=unknown" "PROTOCOL=$protocol" "PORT=$port" "BIND=$bind"
+        warn "Snell #$instance 元数据缺失，已根据现有配置自动恢复。"
+    done < <(proxy_instance_dirs snell)
+}
+
 sync_ss_meta_versions() {
     local instance meta
     while read -r instance; do
@@ -1087,8 +1114,9 @@ install_snell() {
     local target_protocol instance meta port bind current_protocol updated=0 detected_protocol="" instances
     local -a services=()
     migrate_proxy_legacy snell
-    instances="$(proxy_instance_dirs snell)"
+    repair_snell_metadata
     repair_existing_service_units snell "$SNELL_BIN"
+    instances="$(proxy_instance_dirs snell)"
     if [[ "$UPDATE_ONLY" == true ]]; then
         [[ -n "$instances" ]] || die "尚未安装 Snell 实例，无法执行更新。"
         instance=""
